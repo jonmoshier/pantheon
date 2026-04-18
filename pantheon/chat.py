@@ -137,9 +137,29 @@ class PantheonApp(App):
         self.creds = creds
         self.tools_enabled = tools_enabled
         self.root = root
-        self.history: list[dict] = []
+        self.history: list[dict] = [{"role": "system", "content": self._build_system_prompt()}]
         self.pinned_provider: str | None = None
         self.is_processing = False
+
+    def _build_system_prompt(self) -> str:
+        lines = [
+            "You are a helpful terminal assistant running inside Pantheon, a CLI chat tool.",
+            "Be concise and direct. Prefer short answers unless detail is genuinely needed.",
+            "Do not narrate what you are about to do — just do it.",
+        ]
+        if self.tools_enabled:
+            lines += [
+                "",
+                f"You have access to the local filesystem within this working directory: {self.root}",
+                "Available tools:",
+                "  read_file(path)       — read the contents of a file",
+                "  write_file(path, content) — write or overwrite a file",
+                "  list_directory(path)  — list files and subdirectories",
+                "All paths must be relative to the working directory.",
+                "Use tools when the user's request clearly requires reading or writing files.",
+                "Do not speculatively read files unless asked.",
+            ]
+        return "\n".join(lines)
 
     def compose(self) -> ComposeResult:
         yield RichLog(id="output", wrap=True, markup=True, highlight=False)
@@ -243,49 +263,51 @@ class PantheonApp(App):
         self.history.append({"role": "user", "content": user_input})
         excluded: set[str] = set()
 
-        while True:
-            try:
-                if self.pinned_provider:
-                    provider_id = self.pinned_provider
-                    model = PROVIDERS[provider_id]["model"]
-                else:
-                    provider_id, model = pick_model(user_input, exclude=excluded)
-
-                meta = PROVIDERS[provider_id]
-                pin_marker = " (pinned)" if self.pinned_provider else ""
-                self._log(f"  → {meta['label']} ({meta['tier']}){pin_marker}", "#555555 italic")
-                self._log("")
-
-                api_key = _api_key_for(provider_id, self.creds)
-
-                if self.tools_enabled:
-                    await self._run_with_tools(model, api_key)
-                else:
-                    await self._run_streaming(model, api_key)
-
-                break
-
-            except litellm.RateLimitError:
-                excluded.add(provider_id)
-                msg = Text(f"  rate limited on {PROVIDERS[provider_id]['label']}", style="#555555 italic")
-                if self.pinned_provider:
-                    msg.append(" — unpin to enable fallback", style="#f44747")
-                    self._log(msg)
-                    break
+        try:
+            while True:
                 try:
-                    pick_model(user_input, exclude=excluded)
-                    msg.append(", trying next…", style="#555555 italic")
-                    self._log(msg)
-                except RuntimeError:
-                    msg.append(" — no providers remaining", style="#f44747")
-                    self._log(msg)
+                    if self.pinned_provider:
+                        provider_id = self.pinned_provider
+                        model = PROVIDERS[provider_id]["model"]
+                    else:
+                        provider_id, model = pick_model(user_input, exclude=excluded)
+
+                    meta = PROVIDERS[provider_id]
+                    pin_marker = " (pinned)" if self.pinned_provider else ""
+                    self._log(f"  → {meta['label']} ({meta['tier']}){pin_marker}", "#555555 italic")
+                    self._log("")
+
+                    api_key = _api_key_for(provider_id, self.creds)
+
+                    if self.tools_enabled:
+                        await self._run_with_tools(model, api_key)
+                    else:
+                        await self._run_streaming(model, api_key)
+
                     break
 
-            except Exception as e:
-                self._log(f"  error  {e}", "#f44747")
-                break
+                except litellm.RateLimitError:
+                    excluded.add(provider_id)
+                    msg = Text(f"  rate limited on {PROVIDERS[provider_id]['label']}", style="#555555 italic")
+                    if self.pinned_provider:
+                        msg.append(" — unpin to enable fallback", style="#f44747")
+                        self._log(msg)
+                        break
+                    try:
+                        pick_model(user_input, exclude=excluded)
+                        msg.append(", trying next…", style="#555555 italic")
+                        self._log(msg)
+                    except RuntimeError:
+                        msg.append(" — no providers remaining", style="#f44747")
+                        self._log(msg)
+                        break
 
-        self.is_processing = False
+                except Exception as e:
+                    self._log(f"  error  {e}", "#f44747")
+                    break
+        finally:
+            self.is_processing = False
+            self.query_one("#streaming", Static).update("")
 
     async def _run_streaming(self, model: str, api_key: str | None) -> None:
         streaming = self.query_one("#streaming", Static)
