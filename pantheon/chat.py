@@ -8,6 +8,7 @@ from prompt_toolkit import Application
 from prompt_toolkit.data_structures import Point
 from prompt_toolkit.layout import Layout, HSplit, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
+from prompt_toolkit.layout.margins import ScrollbarMargin
 from prompt_toolkit.widgets import TextArea
 from prompt_toolkit.key_binding import KeyBindings
 
@@ -75,7 +76,7 @@ def run(tools_enabled: bool = False):
             focusable=False,
         ),
         wrap_lines=True,
-        scrollbar=True,
+        right_margins=[ScrollbarMargin(display_arrows=False)],
     )
 
     def get_status():
@@ -102,12 +103,12 @@ def run(tools_enabled: bool = False):
             output_fragments.append((style, text))
             app.invalidate()
 
-    # Banner
-    append("  Pantheon\n", "class:banner-title")
+    # Banner — populate directly since app doesn't exist yet
     hints = "/model  ·  /quit"
     if tools_enabled:
         hints += f"  ·  tools on  ·  {root}"
-    append(f"  {hints}\n\n", "class:banner-hint")
+    output_fragments.append(("class:banner-title", "  Pantheon\n"))
+    output_fragments.append(("class:banner-hint", f"  {hints}\n\n"))
 
     def request_confirmation(name: str, args: dict) -> bool:
         nonlocal awaiting_confirmation
@@ -158,30 +159,48 @@ def run(tools_enabled: bool = False):
     def process_message(user_input: str) -> None:
         nonlocal is_processing, pinned_provider
 
-        try:
-            history.append({"role": "user", "content": user_input})
+        history.append({"role": "user", "content": user_input})
+        excluded: set[str] = set()
 
-            if pinned_provider:
-                provider_id = pinned_provider
-                model = PROVIDERS[provider_id]["model"]
-            else:
-                provider_id, model = pick_model(user_input)
+        while True:
+            try:
+                if pinned_provider:
+                    provider_id = pinned_provider
+                    model = PROVIDERS[provider_id]["model"]
+                else:
+                    provider_id, model = pick_model(user_input, exclude=excluded)
 
-            meta = PROVIDERS[provider_id]
-            pin_marker = " (pinned)" if pinned_provider else ""
-            append(f"  → {meta['label']} ({meta['tier']}){pin_marker}\n\n", "class:routing")
+                meta = PROVIDERS[provider_id]
+                pin_marker = " (pinned)" if pinned_provider else ""
+                append(f"  → {meta['label']} ({meta['tier']}){pin_marker}\n\n", "class:routing")
 
-            api_key = _api_key_for(provider_id, creds)
+                api_key = _api_key_for(provider_id, creds)
 
-            if tools_enabled:
-                _run_with_tools(model, api_key)
-            else:
-                _run_streaming(model, api_key)
+                if tools_enabled:
+                    _run_with_tools(model, api_key)
+                else:
+                    _run_streaming(model, api_key)
 
-        except Exception as e:
-            append(f"\n  error  {e}\n\n", "class:error")
-        finally:
-            is_processing = False
+                break
+
+            except litellm.RateLimitError:
+                excluded.add(provider_id)
+                append(f"  rate limited on {PROVIDERS[provider_id]['label']}", "class:routing")
+                if pinned_provider:
+                    append(" — unpin a provider to enable fallback\n\n", "class:error")
+                    break
+                try:
+                    pick_model(user_input, exclude=excluded)  # probe: any left?
+                    append(", trying next…\n\n", "class:routing")
+                except RuntimeError:
+                    append(" — no providers remaining\n\n", "class:error")
+                    break
+
+            except Exception as e:
+                append(f"\n  error  {e}\n\n", "class:error")
+                break
+
+        is_processing = False
 
     def _run_streaming(model: str, api_key: str | None) -> None:
         response = litellm.completion(

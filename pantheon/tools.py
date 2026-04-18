@@ -1,4 +1,3 @@
-import json
 from pathlib import Path
 
 TOOLS = [
@@ -16,6 +15,27 @@ TOOLS = [
                     }
                 },
                 "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "description": "Write content to a file, creating it or overwriting it. Path must be relative to the working directory.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "File path relative to the working directory.",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "The content to write to the file.",
+                    },
+                },
+                "required": ["path", "content"],
             },
         },
     },
@@ -53,6 +73,12 @@ def execute_tool(name: str, args: dict, root: Path) -> str:
             if not target.is_file():
                 return f"Error: not a file: {rel}"
             return target.read_text(errors="replace")
+
+        if name == "write_file":
+            content = args.get("content", "")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content)
+            return f"wrote {len(content)} bytes to {rel}"
 
         if name == "list_directory":
             if not target.exists():

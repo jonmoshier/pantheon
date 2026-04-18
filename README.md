@@ -13,6 +13,8 @@ Pantheon is a cost-aware LLM router for your terminal. Instead of burning throug
 
 ---
 
+![pantheon-screen-grab.png]()
+
 ## How it works
 
 ```

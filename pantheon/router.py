@@ -45,10 +45,10 @@ def classify(prompt: str) -> tuple[str, str]:
     return tier, skill
 
 
-def pick_model(prompt: str) -> tuple[str, str]:
+def pick_model(prompt: str, exclude: set[str] | None = None) -> tuple[str, str]:
     """Return (provider_id, litellm_model_string) for this prompt."""
     tier, skill = classify(prompt)
-    available = enabled_providers()
+    available = [p for p in enabled_providers() if p not in (exclude or set())]
 
     if not available:
         raise RuntimeError("No providers configured. Run: pan auth add")
