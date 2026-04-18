@@ -10,93 +10,134 @@ pub enum StreamEvent {
     Error(String),
 }
 
-struct ToolCall {
+// ── Anthropic tool call (collected during streaming) ─────────────────────────
+
+struct AnthropicToolCall {
     id: String,
     name: String,
-    input_json: String,
+    input_json: String, // accumulated partial JSON
 }
 
-/// OpenAI-compatible streaming (Groq, Together, OpenAI, Ollama, etc.).
-/// Same wire format everywhere — only base_url and the Authorization header change.
-pub async fn stream_openai_compat(
-    base_url: String,
-    api_key: String,
-    model: String,
-    messages: Vec<Value>,
-    tx: mpsc::Sender<StreamEvent>,
-) {
-    if let Err(e) = openai_loop(base_url, api_key, model, messages, &tx).await {
-        tx.send(StreamEvent::Error(e.to_string())).await.ok();
-    }
+// ── OpenAI tool call (collected during streaming) ─────────────────────────────
+
+struct OpenAiToolCall {
+    id: String,
+    name: String,
+    arguments: String, // accumulated partial JSON string
 }
 
-async fn openai_loop(
-    base_url: String,
-    api_key: String,
-    model: String,
-    messages: Vec<Value>,
-    tx: &mpsc::Sender<StreamEvent>,
-) -> anyhow::Result<()> {
-    let client = Client::new();
+// ── Shared tool execution ─────────────────────────────────────────────────────
 
-    let resp = client
-        .post(format!("{}/chat/completions", base_url))
-        .header("Authorization", format!("Bearer {}", api_key))
-        .header("content-type", "application/json")
-        .json(&json!({
-            "model": model,
-            "messages": messages,
-            "stream": true,
-        }))
-        .send()
-        .await?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        tx.send(StreamEvent::Error(format!("{}: {}", status, body))).await.ok();
-        return Ok(());
-    }
-
-    let mut stream = resp.bytes_stream();
-    let mut buf = String::new();
-    let mut text = String::new();
-
-    'outer: while let Some(chunk) = stream.next().await {
-        buf.push_str(&String::from_utf8_lossy(&chunk?));
-        while let Some(pos) = buf.find('\n') {
-            let line = buf[..pos].trim().to_string();
-            buf = buf[pos + 1..].to_string();
-
-            let data = match line.strip_prefix("data: ") {
-                Some(d) => d,
-                None => continue,
-            };
-
-            if data == "[DONE]" {
-                break 'outer;
-            }
-
-            if let Ok(v) = serde_json::from_str::<Value>(data) {
-                if let Some(content) = v["choices"][0]["delta"]["content"].as_str() {
-                    if !content.is_empty() {
-                        text.push_str(content);
-                        tx.send(StreamEvent::Delta(content.to_string())).await.ok();
-                    }
+async fn run_tool(name: &str, input: &Value, tx: &mpsc::Sender<StreamEvent>) -> String {
+    match name {
+        "read_file" => {
+            let path = input["path"].as_str().unwrap_or("");
+            match std::fs::read_to_string(path) {
+                Ok(content) => {
+                    tx.send(StreamEvent::Delta(format!("← _read {} bytes_\n", content.len())))
+                        .await.ok();
+                    content
+                }
+                Err(e) => {
+                    let msg = format!("error: {}", e);
+                    tx.send(StreamEvent::Delta(format!("← _{}_\n", msg))).await.ok();
+                    msg
                 }
             }
         }
+        "write_file" => {
+            let path = input["path"].as_str().unwrap_or("");
+            let content = input["content"].as_str().unwrap_or("");
+            match std::fs::write(path, content) {
+                Ok(_) => {
+                    tx.send(StreamEvent::Delta(format!("← _wrote {} bytes_\n", content.len())))
+                        .await.ok();
+                    "ok".to_string()
+                }
+                Err(e) => {
+                    let msg = format!("error: {}", e);
+                    tx.send(StreamEvent::Delta(format!("← _{}_\n", msg))).await.ok();
+                    msg
+                }
+            }
+        }
+        _ => format!("unknown tool: {}", name),
     }
-
-    // Record the assistant turn so subsequent messages in the same session include it
-    tx.send(StreamEvent::ApiHistory(vec![
-        json!({"role": "assistant", "content": text}),
-    ]))
-    .await
-    .ok();
-    tx.send(StreamEvent::Done).await.ok();
-    Ok(())
 }
+
+fn tool_hint(name: &str, input: &Value) -> String {
+    match name {
+        "read_file" | "write_file" => input["path"].as_str().unwrap_or("?").to_string(),
+        _ => String::new(),
+    }
+}
+
+// ── Anthropic tool definitions ────────────────────────────────────────────────
+// Uses "input_schema" key per Anthropic spec.
+
+fn anthropic_tool_defs() -> Vec<Value> {
+    vec![
+        json!({
+            "name": "read_file",
+            "description": "Read the contents of a file at the given path.",
+            "input_schema": {
+                "type": "object",
+                "properties": { "path": { "type": "string" } },
+                "required": ["path"]
+            }
+        }),
+        json!({
+            "name": "write_file",
+            "description": "Write content to a file, creating or overwriting it.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "path":    { "type": "string" },
+                    "content": { "type": "string" }
+                },
+                "required": ["path", "content"]
+            }
+        }),
+    ]
+}
+
+// ── OpenAI tool definitions ───────────────────────────────────────────────────
+// Same tools, different schema key ("parameters" instead of "input_schema")
+// and wrapped in {"type":"function","function":{...}}.
+
+fn openai_tool_defs() -> Vec<Value> {
+    vec![
+        json!({
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "description": "Read the contents of a file at the given path.",
+                "parameters": {
+                    "type": "object",
+                    "properties": { "path": { "type": "string" } },
+                    "required": ["path"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "write_file",
+                "description": "Write content to a file, creating or overwriting it.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path":    { "type": "string" },
+                        "content": { "type": "string" }
+                    },
+                    "required": ["path", "content"]
+                }
+            }
+        }),
+    ]
+}
+
+// ── Anthropic streaming ───────────────────────────────────────────────────────
 
 pub async fn stream_anthropic(
     api_key: String,
@@ -104,12 +145,12 @@ pub async fn stream_anthropic(
     messages: Vec<Value>,
     tx: mpsc::Sender<StreamEvent>,
 ) {
-    if let Err(e) = agentic_loop(api_key, model, messages, &tx).await {
+    if let Err(e) = anthropic_loop(api_key, model, messages, &tx).await {
         tx.send(StreamEvent::Error(e.to_string())).await.ok();
     }
 }
 
-async fn agentic_loop(
+async fn anthropic_loop(
     api_key: String,
     model: String,
     initial_messages: Vec<Value>,
@@ -129,7 +170,7 @@ async fn agentic_loop(
                 "model": model,
                 "max_tokens": 8096,
                 "messages": all_messages,
-                "tools": tool_defs(),
+                "tools": anthropic_tool_defs(),
                 "stream": true,
             }))
             .send()
@@ -142,41 +183,30 @@ async fn agentic_loop(
             return Ok(());
         }
 
-        let (text, calls) = collect_stream(resp, tx).await?;
+        let (text, calls) = collect_anthropic_stream(resp, tx).await?;
 
         if calls.is_empty() {
             new_msgs.push(json!({"role": "assistant", "content": text}));
             break;
         }
 
-        // Build assistant message with full content array (text + tool_use blocks)
         let mut content: Vec<Value> = Vec::new();
         if !text.is_empty() {
             content.push(json!({"type": "text", "text": text}));
         }
         for tc in &calls {
             let input: Value = serde_json::from_str(&tc.input_json).unwrap_or(Value::Null);
-            content.push(json!({
-                "type": "tool_use",
-                "id": tc.id,
-                "name": tc.name,
-                "input": input,
-            }));
+            content.push(json!({"type": "tool_use", "id": tc.id, "name": tc.name, "input": input}));
         }
         let assistant_msg = json!({"role": "assistant", "content": content});
         all_messages.push(assistant_msg.clone());
         new_msgs.push(assistant_msg);
 
-        // Execute tools, build tool_result user message
         let mut results: Vec<Value> = Vec::new();
         for tc in &calls {
             let input: Value = serde_json::from_str(&tc.input_json).unwrap_or(Value::Null);
             let output = run_tool(&tc.name, &input, tx).await;
-            results.push(json!({
-                "type": "tool_result",
-                "tool_use_id": tc.id,
-                "content": output,
-            }));
+            results.push(json!({"type": "tool_result", "tool_use_id": tc.id, "content": output}));
         }
         let results_msg = json!({"role": "user", "content": results});
         all_messages.push(results_msg.clone());
@@ -188,14 +218,14 @@ async fn agentic_loop(
     Ok(())
 }
 
-async fn collect_stream(
+async fn collect_anthropic_stream(
     resp: reqwest::Response,
     tx: &mpsc::Sender<StreamEvent>,
-) -> anyhow::Result<(String, Vec<ToolCall>)> {
+) -> anyhow::Result<(String, Vec<AnthropicToolCall>)> {
     let mut stream = resp.bytes_stream();
     let mut buf = String::new();
     let mut text = String::new();
-    let mut calls: Vec<ToolCall> = Vec::new();
+    let mut calls: Vec<AnthropicToolCall> = Vec::new();
     let mut cur_tool: Option<usize> = None;
 
     while let Some(chunk) = stream.next().await {
@@ -221,7 +251,7 @@ async fn collect_stream(
                         let name = block["name"].as_str().unwrap_or("").to_string();
                         tx.send(StreamEvent::Delta(format!("\n→ **{}**", name))).await.ok();
                         cur_tool = Some(calls.len());
-                        calls.push(ToolCall { id, name, input_json: String::new() });
+                        calls.push(AnthropicToolCall { id, name, input_json: String::new() });
                     } else {
                         cur_tool = None;
                     }
@@ -249,8 +279,12 @@ async fn collect_stream(
                     if let Some(i) = cur_tool {
                         let input: Value =
                             serde_json::from_str(&calls[i].input_json).unwrap_or(Value::Null);
-                        let hint = tool_hint(&calls[i].name, &input);
-                        tx.send(StreamEvent::Delta(format!(" `{}`\n", hint))).await.ok();
+                        tx.send(StreamEvent::Delta(format!(
+                            " `{}`\n",
+                            tool_hint(&calls[i].name, &input)
+                        )))
+                        .await
+                        .ok();
                     }
                     cur_tool = None;
                 }
@@ -262,91 +296,171 @@ async fn collect_stream(
     Ok((text, calls))
 }
 
-async fn run_tool(name: &str, input: &Value, tx: &mpsc::Sender<StreamEvent>) -> String {
-    match name {
-        "read_file" => {
-            let path = input["path"].as_str().unwrap_or("");
-            match std::fs::read_to_string(path) {
-                Ok(content) => {
-                    tx.send(StreamEvent::Delta(format!(
-                        "← _read {} bytes_\n",
-                        content.len()
-                    )))
-                    .await
-                    .ok();
-                    content
-                }
-                Err(e) => {
-                    let msg = format!("error: {}", e);
-                    tx.send(StreamEvent::Delta(format!("← _{}_\n", msg))).await.ok();
-                    msg
-                }
-            }
-        }
-        "write_file" => {
-            let path = input["path"].as_str().unwrap_or("");
-            let content = input["content"].as_str().unwrap_or("");
-            match std::fs::write(path, content) {
-                Ok(_) => {
-                    tx.send(StreamEvent::Delta(format!(
-                        "← _wrote {} bytes_\n",
-                        content.len()
-                    )))
-                    .await
-                    .ok();
-                    "ok".to_string()
-                }
-                Err(e) => {
-                    let msg = format!("error: {}", e);
-                    tx.send(StreamEvent::Delta(format!("← _{}_\n", msg))).await.ok();
-                    msg
-                }
-            }
-        }
-        _ => format!("unknown tool: {}", name),
+// ── OpenAI-compatible streaming (Groq, Together, OpenAI, Ollama…) ─────────────
+
+pub async fn stream_openai_compat(
+    base_url: String,
+    api_key: String,
+    model: String,
+    messages: Vec<Value>,
+    tx: mpsc::Sender<StreamEvent>,
+) {
+    if let Err(e) = openai_loop(base_url, api_key, model, messages, &tx).await {
+        tx.send(StreamEvent::Error(e.to_string())).await.ok();
     }
 }
 
-fn tool_hint(name: &str, input: &Value) -> String {
-    match name {
-        "read_file" | "write_file" => input["path"].as_str().unwrap_or("?").to_string(),
-        _ => String::new(),
+async fn openai_loop(
+    base_url: String,
+    api_key: String,
+    model: String,
+    initial_messages: Vec<Value>,
+    tx: &mpsc::Sender<StreamEvent>,
+) -> anyhow::Result<()> {
+    let client = Client::new();
+    let mut all_messages = initial_messages;
+    let mut new_msgs: Vec<Value> = Vec::new();
+
+    loop {
+        let resp = client
+            .post(format!("{}/chat/completions", base_url))
+            .header("Authorization", format!("Bearer {}", api_key))
+            .header("content-type", "application/json")
+            .json(&json!({
+                "model": model,
+                "messages": all_messages,
+                "tools": openai_tool_defs(),
+                "stream": true,
+            }))
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            tx.send(StreamEvent::Error(format!("{}: {}", status, body))).await.ok();
+            return Ok(());
+        }
+
+        let (text, calls) = collect_openai_stream(resp, tx).await?;
+
+        if calls.is_empty() {
+            new_msgs.push(json!({"role": "assistant", "content": text}));
+            break;
+        }
+
+        // OpenAI format: tool_calls array at the top level of the assistant message
+        let tool_calls_json: Vec<Value> = calls.iter().map(|tc| json!({
+            "id": tc.id,
+            "type": "function",
+            "function": { "name": tc.name, "arguments": tc.arguments }
+        })).collect();
+
+        let assistant_msg = json!({
+            "role": "assistant",
+            "content": if text.is_empty() { Value::Null } else { Value::String(text) },
+            "tool_calls": tool_calls_json,
+        });
+        all_messages.push(assistant_msg.clone());
+        new_msgs.push(assistant_msg);
+
+        // OpenAI format: one "tool" role message per result (vs Anthropic's single user message)
+        for tc in &calls {
+            let args: Value = serde_json::from_str(&tc.arguments).unwrap_or(Value::Null);
+            let output = run_tool(&tc.name, &args, tx).await;
+            let tool_msg = json!({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "content": output,
+            });
+            all_messages.push(tool_msg.clone());
+            new_msgs.push(tool_msg);
+        }
     }
+
+    tx.send(StreamEvent::ApiHistory(new_msgs)).await.ok();
+    tx.send(StreamEvent::Done).await.ok();
+    Ok(())
 }
 
-fn tool_defs() -> Vec<Value> {
-    vec![
-        json!({
-            "name": "read_file",
-            "description": "Read the contents of a file at the given path. Returns the file content as text.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to the file to read"
-                    }
-                },
-                "required": ["path"]
+async fn collect_openai_stream(
+    resp: reqwest::Response,
+    tx: &mpsc::Sender<StreamEvent>,
+) -> anyhow::Result<(String, Vec<OpenAiToolCall>)> {
+    let mut stream = resp.bytes_stream();
+    let mut buf = String::new();
+    let mut text = String::new();
+    let mut calls: Vec<OpenAiToolCall> = Vec::new();
+
+    'outer: while let Some(chunk) = stream.next().await {
+        buf.push_str(&String::from_utf8_lossy(&chunk?));
+        while let Some(pos) = buf.find('\n') {
+            let line = buf[..pos].trim().to_string();
+            buf = buf[pos + 1..].to_string();
+
+            let data = match line.strip_prefix("data: ") {
+                Some(d) => d,
+                None => continue,
+            };
+
+            if data == "[DONE]" {
+                break 'outer;
             }
-        }),
-        json!({
-            "name": "write_file",
-            "description": "Write content to a file, creating it if it doesn't exist and overwriting if it does.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to the file to write"
-                    },
-                    "content": {
-                        "type": "string",
-                        "description": "Content to write to the file"
-                    }
-                },
-                "required": ["path", "content"]
+
+            let v: Value = match serde_json::from_str(data) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            let choice = &v["choices"][0];
+
+            // Text delta
+            if let Some(content) = choice["delta"]["content"].as_str() {
+                if !content.is_empty() {
+                    text.push_str(content);
+                    tx.send(StreamEvent::Delta(content.to_string())).await.ok();
+                }
             }
-        }),
-    ]
+
+            // Tool call deltas — arguments stream in across many chunks
+            if let Some(tc_deltas) = choice["delta"]["tool_calls"].as_array() {
+                for delta in tc_deltas {
+                    let idx = delta["index"].as_u64().unwrap_or(0) as usize;
+                    while calls.len() <= idx {
+                        calls.push(OpenAiToolCall {
+                            id: String::new(),
+                            name: String::new(),
+                            arguments: String::new(),
+                        });
+                    }
+                    if let Some(id) = delta["id"].as_str() {
+                        calls[idx].id = id.to_string();
+                    }
+                    if let Some(name) = delta["function"]["name"].as_str() {
+                        calls[idx].name = name.to_string();
+                        tx.send(StreamEvent::Delta(format!("\n→ **{}**", name))).await.ok();
+                    }
+                    if let Some(args) = delta["function"]["arguments"].as_str() {
+                        calls[idx].arguments.push_str(args);
+                    }
+                }
+            }
+
+            // finish_reason signals all tool arguments are complete — show hints
+            if choice["finish_reason"] == "tool_calls" {
+                for tc in &calls {
+                    let args: Value =
+                        serde_json::from_str(&tc.arguments).unwrap_or(Value::Null);
+                    tx.send(StreamEvent::Delta(format!(
+                        " `{}`\n",
+                        tool_hint(&tc.name, &args)
+                    )))
+                    .await
+                    .ok();
+                }
+            }
+        }
+    }
+
+    Ok((text, calls))
 }
