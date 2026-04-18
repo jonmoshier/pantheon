@@ -11,15 +11,30 @@ from pantheon.router import pick_model
 
 litellm.suppress_debug_info = True
 litellm.disable_fallbacks = True
+litellm.vertex_project = None
+litellm.vertex_location = None
 
 console = Console()
 HISTORY_FILE = Path.home() / ".pantheon" / "history"
+
+
+_VERTEX_ENV_VARS = (
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "GOOGLE_CLOUD_PROJECT",
+    "VERTEXAI_PROJECT",
+    "VERTEXAI_LOCATION",
+    "VERTEX_PROJECT",
+    "VERTEX_LOCATION",
+)
 
 
 def _load_creds() -> dict:
     creds = load_credentials()
     for key, val in creds.items():
         os.environ[key] = val
+    # Prevent litellm from routing Gemini calls to Vertex AI
+    for var in _VERTEX_ENV_VARS:
+        os.environ.pop(var, None)
     return creds
 
 

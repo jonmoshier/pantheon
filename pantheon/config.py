@@ -10,7 +10,7 @@ CONFIG_FILE = CONFIG_DIR / "config.json"
 PROVIDERS = {
     "gemini-flash": {
         "label": "Gemini 2.0 Flash",
-        "model": "gemini/gemini-2.0-flash",
+        "model": "gemini/gemini-flash-latest",
         "tier": "free",
         "env_key": "GEMINI_API_KEY",
         "key_url": "https://aistudio.google.com/app/apikey",
