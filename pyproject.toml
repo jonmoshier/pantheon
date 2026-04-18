@@ -14,6 +14,9 @@ dependencies = [
     "prompt_toolkit>=3.0.0",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
 [project.scripts]
 pan = "pantheon.cli:app"
 
