@@ -14,6 +14,7 @@ PROVIDERS = {
         "tier": "free",
         "env_key": "GEMINI_API_KEY",
         "key_url": "https://aistudio.google.com/app/apikey",
+        "skills": ["speed", "summarization", "routing"],
     },
     "groq-llama": {
         "label": "Groq / Llama 3",
@@ -21,6 +22,7 @@ PROVIDERS = {
         "tier": "free",
         "env_key": "GROQ_API_KEY",
         "key_url": "https://console.groq.com/keys",
+        "skills": ["speed", "routing"],
     },
     "claude-haiku": {
         "label": "Claude Haiku",
@@ -28,6 +30,7 @@ PROVIDERS = {
         "tier": "cheap",
         "env_key": "ANTHROPIC_API_KEY",
         "key_url": "https://console.anthropic.com/settings/keys",
+        "skills": ["code", "summarization", "routing"],
     },
     "claude-sonnet": {
         "label": "Claude Sonnet",
@@ -35,6 +38,7 @@ PROVIDERS = {
         "tier": "full",
         "env_key": "ANTHROPIC_API_KEY",
         "key_url": "https://console.anthropic.com/settings/keys",
+        "skills": ["code", "reasoning", "creative"],
     },
     "gpt-4o-mini": {
         "label": "GPT-4o mini",
@@ -42,6 +46,7 @@ PROVIDERS = {
         "tier": "cheap",
         "env_key": "OPENAI_API_KEY",
         "key_url": "https://platform.openai.com/api-keys",
+        "skills": ["structured_output", "speed"],
     },
 }
 
