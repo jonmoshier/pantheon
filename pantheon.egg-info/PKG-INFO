@@ -1,0 +1,11 @@
+Metadata-Version: 2.4
+Name: pantheon
+Version: 0.1.0
+Summary: Cost-aware LLM router for your terminal
+Requires-Python: >=3.11
+Requires-Dist: litellm>=1.35.0
+Requires-Dist: typer>=0.12.0
+Requires-Dist: rich>=13.0.0
+Requires-Dist: prompt_toolkit>=3.0.0
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0; extra == "dev"
