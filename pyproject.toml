@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "pantheon"
+version = "0.1.0"
+description = "Cost-aware LLM router for your terminal"
+requires-python = ">=3.11"
+dependencies = [
+    "litellm>=1.35.0",
+    "typer>=0.12.0",
+    "rich>=13.0.0",
+    "prompt_toolkit>=3.0.0",
+    "InquirerPy>=0.3.4",
+]
+
+[project.scripts]
+pan = "pantheon.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["pantheon*"]

@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+*.egg
+
+# Credentials — never commit these
+.pantheon/
+credentials.json
+
+# Env
+.env
+
+# Editor
+.vscode/
+.idea/
+*.swp
