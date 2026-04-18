@@ -1,34 +1,21 @@
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Margin, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Wrap},
 };
 
 use crate::app::{App, AppMode, Role, MODELS};
 
-const BG: Color = Color::Rgb(13, 13, 13);
-const SURFACE: Color = Color::Rgb(24, 24, 24);
-const BORDER: Color = Color::Rgb(50, 50, 50);
-const BORDER_ACTIVE: Color = Color::Rgb(65, 65, 65);
-const DIM: Color = Color::Rgb(80, 80, 80);
-const SEP_COLOR: Color = Color::Rgb(30, 30, 30);
-const USER_BLUE: Color = Color::Rgb(86, 156, 214);
-const TEXT: Color = Color::Rgb(212, 212, 212);
-const STATUS_FG: Color = Color::Rgb(90, 90, 90);
-const TITLE: Color = Color::Rgb(200, 200, 200);
-const ERROR_RED: Color = Color::Rgb(244, 71, 71);
-
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 pub fn render(f: &mut Frame, app: &mut App) {
     let area = f.area();
+    let theme = app.theme();
 
-    // Full-area background
-    f.render_widget(Block::default().style(Style::default().bg(BG)), area);
+    f.render_widget(Block::default().style(Style::default().bg(theme.bg)), area);
 
-    // Horizontal padding
     let content = area.inner(Margin { horizontal: 3, vertical: 0 });
 
     let chunks = Layout::default()
@@ -36,7 +23,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
         .constraints([
             Constraint::Min(3),
             Constraint::Length(1),
-            Constraint::Length(5), // 4 for box + 1 bottom gap
+            Constraint::Length(5),
         ])
         .split(content);
 
@@ -47,18 +34,22 @@ pub fn render(f: &mut Frame, app: &mut App) {
     if matches!(app.mode, AppMode::ModelSelect) {
         render_model_picker(f, app);
     }
+    if let AppMode::Confirm(ref desc) = app.mode {
+        render_confirm(f, app, desc.clone());
+    }
 }
 
 fn render_messages(f: &mut Frame, app: &mut App, area: Rect) {
+    let theme = app.theme();
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     lines.push(Line::from(Span::styled(
         "Pantheon",
-        Style::default().fg(TITLE).add_modifier(Modifier::BOLD),
+        Style::default().fg(theme.title).add_modifier(Modifier::BOLD),
     )));
     lines.push(Line::from(Span::styled(
-        "Ctrl+P model  ·  Ctrl+X cancel  ·  Alt+Enter newline  ·  /quit",
-        Style::default().fg(DIM),
+        "Ctrl+P model  ·  Ctrl+T theme  ·  Ctrl+X cancel  ·  Alt+Enter newline  ·  /quit",
+        Style::default().fg(theme.dim),
     )));
     lines.push(Line::default());
 
@@ -70,12 +61,12 @@ fn render_messages(f: &mut Frame, app: &mut App, area: Rect) {
             Role::User => {
                 lines.push(Line::from(Span::styled(
                     "you",
-                    Style::default().fg(USER_BLUE).add_modifier(Modifier::BOLD),
+                    Style::default().fg(theme.user_accent).add_modifier(Modifier::BOLD),
                 )));
                 for text_line in msg.content.lines() {
                     lines.push(Line::from(Span::styled(
                         format!("  {}", text_line),
-                        Style::default().fg(TEXT),
+                        Style::default().fg(theme.text),
                     )));
                 }
             }
@@ -83,24 +74,24 @@ fn render_messages(f: &mut Frame, app: &mut App, area: Rect) {
                 let label = msg.model_label.as_deref().unwrap_or("assistant");
                 lines.push(Line::from(Span::styled(
                     label.to_string(),
-                    Style::default().fg(DIM).add_modifier(Modifier::BOLD),
+                    Style::default().fg(theme.dim).add_modifier(Modifier::BOLD),
                 )));
-                for md_line in crate::markdown::to_lines(&msg.content) {
+                for md_line in crate::markdown::to_lines(&msg.content, theme) {
                     lines.push(indent_line(md_line));
                 }
             }
             Role::System => {
                 for text_line in msg.content.lines() {
                     let style = if text_line.starts_with("error") {
-                        Style::default().fg(ERROR_RED)
+                        Style::default().fg(theme.error)
                     } else {
-                        Style::default().fg(DIM)
+                        Style::default().fg(theme.dim)
                     };
                     lines.push(Line::from(Span::styled(text_line.to_string(), style)));
                 }
             }
         }
-        lines.push(Line::from(Span::styled(sep.clone(), Style::default().fg(SEP_COLOR))));
+        lines.push(Line::from(Span::styled(sep.clone(), Style::default().fg(theme.sep))));
         lines.push(Line::default());
     }
 
@@ -109,10 +100,10 @@ fn render_messages(f: &mut Frame, app: &mut App, area: Rect) {
         let label = app.model().label;
         lines.push(Line::from(Span::styled(
             format!("{} {}", label, spinner),
-            Style::default().fg(DIM).add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.dim).add_modifier(Modifier::BOLD),
         )));
         if !app.current_stream.is_empty() {
-            for md_line in crate::markdown::to_lines(&app.current_stream) {
+            for md_line in crate::markdown::to_lines(&app.current_stream, theme) {
                 lines.push(indent_line(md_line));
             }
         }
@@ -130,7 +121,7 @@ fn render_messages(f: &mut Frame, app: &mut App, area: Rect) {
 
     f.render_widget(
         Paragraph::new(lines)
-            .style(Style::default().bg(BG).fg(TEXT))
+            .style(Style::default().bg(theme.bg).fg(theme.text))
             .wrap(Wrap { trim: false })
             .scroll((scroll, 0)),
         area,
@@ -138,6 +129,7 @@ fn render_messages(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn render_status(f: &mut Frame, app: &App, area: Rect) {
+    let theme = app.theme();
     let spinner = SPINNER[app.spinner_tick as usize % SPINNER.len()];
     let text = if app.streaming {
         format!("{} {}  streaming", app.model().label, spinner)
@@ -145,27 +137,28 @@ fn render_status(f: &mut Frame, app: &App, area: Rect) {
         app.model().label.to_string()
     };
     f.render_widget(
-        Paragraph::new(text).style(Style::default().fg(STATUS_FG).bg(BG)),
+        Paragraph::new(text).style(Style::default().fg(theme.status_fg).bg(theme.bg)),
         area,
     );
 }
 
 fn render_input(f: &mut Frame, app: &mut App, area: Rect) {
-    // Leave 1 row bottom gap for the "lifted" look
+    let theme = app.theme();
     let box_area = Rect::new(area.x, area.y, area.width, area.height.saturating_sub(1));
 
-    let border_color = if app.streaming { BORDER } else { BORDER_ACTIVE };
+    let border_color = if app.streaming { theme.border } else { theme.border_active };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(border_color))
-        .style(Style::default().bg(SURFACE));
+        .style(Style::default().bg(theme.surface));
     let inner = block.inner(box_area);
     f.render_widget(block, box_area);
     f.render_widget(&app.textarea, inner);
 }
 
 fn render_model_picker(f: &mut Frame, app: &App) {
+    let theme = app.theme();
     let popup_width = 38u16;
     let popup_height = (MODELS.len() + 2) as u16;
     let area = centered_rect(popup_width, popup_height, f.area());
@@ -177,9 +170,9 @@ fn render_model_picker(f: &mut Frame, app: &App) {
         .enumerate()
         .map(|(i, m)| {
             let (prefix, style) = if i == app.picker_idx {
-                ("  ▸ ", Style::default().fg(USER_BLUE).add_modifier(Modifier::BOLD))
+                ("  ▸ ", Style::default().fg(theme.user_accent).add_modifier(Modifier::BOLD))
             } else {
-                ("    ", Style::default().fg(TEXT))
+                ("    ", Style::default().fg(theme.text))
             };
             ListItem::new(format!("{}{}", prefix, m.label)).style(style)
         })
@@ -189,13 +182,48 @@ fn render_model_picker(f: &mut Frame, app: &App) {
         Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(BORDER_ACTIVE))
-            .style(Style::default().bg(SURFACE))
+            .border_style(Style::default().fg(theme.border_active))
+            .style(Style::default().bg(theme.surface))
             .title(" Select Model ")
-            .title_style(Style::default().fg(DIM)),
+            .title_style(Style::default().fg(theme.dim)),
     );
 
     f.render_widget(list, area);
+}
+
+fn render_confirm(f: &mut Frame, app: &App, desc: String) {
+    let theme = app.theme();
+    let popup_width = (desc.len() as u16 + 6).max(42).min(f.area().width - 4);
+    let popup_height = 5u16;
+    let area = centered_rect(popup_width, popup_height, f.area());
+
+    f.render_widget(Clear, area);
+
+    let content = vec![
+        Line::default(),
+        Line::from(Span::styled(
+            format!("  {}", desc),
+            Style::default().fg(theme.text),
+        )),
+        Line::default(),
+        Line::from(vec![
+            Span::styled("  [ Y ] approve", Style::default().fg(theme.user_accent).add_modifier(Modifier::BOLD)),
+            Span::styled("   [ N ] deny", Style::default().fg(theme.error)),
+        ]),
+    ];
+
+    f.render_widget(
+        Paragraph::new(content).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(theme.border_active))
+                .style(Style::default().bg(theme.surface))
+                .title(" Approve Tool ")
+                .title_style(Style::default().fg(theme.dim)),
+        ),
+        area,
+    );
 }
 
 fn indent_line(line: Line<'static>) -> Line<'static> {

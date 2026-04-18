@@ -1,22 +1,21 @@
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use ratatui::{
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
 };
 
-const TEXT: Color = Color::Rgb(212, 212, 212);
-const DIM: Color = Color::Rgb(85, 85, 85);
-const CODE_FG: Color = Color::Rgb(206, 145, 120);
-const CODE_BG: Color = Color::Rgb(30, 30, 30);
-const HEADING_COLOR: Color = Color::Rgb(86, 156, 214);
+use crate::theme::Theme;
 
-pub fn to_lines(content: &str) -> Vec<Line<'static>> {
+pub fn to_lines(content: &str, theme: &Theme) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut in_code_block = false;
     let mut bold = false;
     let mut italic = false;
     let mut in_heading = false;
+
+    let (text, dim, code_fg, code_bg, heading) =
+        (theme.text, theme.dim, theme.code_fg, theme.code_bg, theme.heading);
 
     let parser = Parser::new_ext(content, Options::all());
 
@@ -52,7 +51,7 @@ pub fn to_lines(content: &str) -> Vec<Line<'static>> {
                 lines.push(Line::default());
             }
             Event::Start(Tag::Item) => {
-                spans.push(Span::styled("• ", Style::default().fg(DIM)));
+                spans.push(Span::styled("• ", Style::default().fg(dim)));
             }
             Event::End(TagEnd::Item) => {
                 flush(&mut spans, &mut lines);
@@ -60,36 +59,33 @@ pub fn to_lines(content: &str) -> Vec<Line<'static>> {
             Event::Rule => {
                 lines.push(Line::from(Span::styled(
                     "──────────────────────────────────────",
-                    Style::default().fg(DIM),
+                    Style::default().fg(dim),
                 )));
             }
-            Event::Text(text) => {
+            Event::Text(t) => {
                 if in_code_block {
-                    for line in text.lines() {
+                    for line in t.lines() {
                         lines.push(Line::from(Span::styled(
                             format!("  {}", line),
-                            Style::default().fg(CODE_FG).bg(CODE_BG),
+                            Style::default().fg(code_fg).bg(code_bg),
                         )));
                     }
                 } else {
-                    let mut style = Style::default().fg(TEXT);
+                    let mut style = Style::default().fg(text);
                     if bold || in_heading {
                         style = style.add_modifier(Modifier::BOLD);
                     }
                     if in_heading {
-                        style = style.fg(HEADING_COLOR);
+                        style = style.fg(heading);
                     }
                     if italic {
                         style = style.add_modifier(Modifier::ITALIC);
                     }
-                    spans.push(Span::styled(text.into_string(), style));
+                    spans.push(Span::styled(t.into_string(), style));
                 }
             }
-            Event::Code(text) => {
-                spans.push(Span::styled(
-                    text.into_string(),
-                    Style::default().fg(CODE_FG),
-                ));
+            Event::Code(t) => {
+                spans.push(Span::styled(t.into_string(), Style::default().fg(code_fg)));
             }
             Event::SoftBreak => {
                 spans.push(Span::raw(" "));

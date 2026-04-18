@@ -2,6 +2,7 @@ mod api;
 mod app;
 mod config;
 mod markdown;
+mod theme;
 mod ui;
 
 use anyhow::Result;
@@ -60,6 +61,10 @@ async fn run(mut app: app::App) -> Result<()> {
                             app.open_model_picker();
                         }
 
+                        (KeyModifiers::CONTROL, KeyCode::Char('t')) => {
+                            app.cycle_theme();
+                        }
+
                         // Plain Enter submits; Alt+Enter inserts a newline
                         (KeyModifiers::NONE, KeyCode::Enter) => app.submit(),
                         (KeyModifiers::ALT, KeyCode::Enter) => {
@@ -83,6 +88,15 @@ async fn run(mut app: app::App) -> Result<()> {
                         KeyCode::Down | KeyCode::Char('j') => app.picker_down(),
                         _ => {}
                     },
+                    AppMode::Confirm(_) => {
+                        let approved = matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter);
+                        if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter | KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc) {
+                            if let Some(tx) = app.confirm_tx.take() {
+                                tx.send(approved).await.ok();
+                            }
+                            app.mode = app::AppMode::Normal;
+                        }
+                    }
                 },
                 Event::Resize(_, _) => {}
                 _ => {}

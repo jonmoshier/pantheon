@@ -6,6 +6,7 @@ use tokio::sync::mpsc;
 pub enum StreamEvent {
     Delta(String),
     ApiHistory(Vec<Value>),
+    ConfirmRequest(String),
     Done,
     Error(String),
 }
@@ -15,7 +16,7 @@ pub enum StreamEvent {
 struct AnthropicToolCall {
     id: String,
     name: String,
-    input_json: String, // accumulated partial JSON
+    input_json: String,
 }
 
 // ── OpenAI tool call (collected during streaming) ─────────────────────────────
@@ -23,12 +24,17 @@ struct AnthropicToolCall {
 struct OpenAiToolCall {
     id: String,
     name: String,
-    arguments: String, // accumulated partial JSON string
+    arguments: String,
 }
 
 // ── Shared tool execution ─────────────────────────────────────────────────────
 
-async fn run_tool(name: &str, input: &Value, tx: &mpsc::Sender<StreamEvent>) -> String {
+async fn run_tool(
+    name: &str,
+    input: &Value,
+    tx: &mpsc::Sender<StreamEvent>,
+    confirm_rx: &mut mpsc::Receiver<bool>,
+) -> String {
     match name {
         "read_file" => {
             let path = input["path"].as_str().unwrap_or("");
@@ -61,19 +67,148 @@ async fn run_tool(name: &str, input: &Value, tx: &mpsc::Sender<StreamEvent>) -> 
                 }
             }
         }
+        "append_file" => {
+            let path = input["path"].as_str().unwrap_or("");
+            let content = input["content"].as_str().unwrap_or("");
+            let desc = format!("append {} bytes → {}", content.len(), path);
+            if !prompt_confirm(&desc, tx, confirm_rx).await { return "denied".into(); }
+            use std::io::Write as _;
+            match std::fs::OpenOptions::new().create(true).append(true).open(path) {
+                Ok(mut file) => match file.write_all(content.as_bytes()) {
+                    Ok(_) => {
+                        tx.send(StreamEvent::Delta(format!("← _appended {} bytes_\n", content.len())))
+                            .await.ok();
+                        "ok".to_string()
+                    }
+                    Err(e) => format!("error: {}", e),
+                },
+                Err(e) => format!("error: {}", e),
+            }
+        }
+        "list_dir" => {
+            let path = input["path"].as_str().unwrap_or(".");
+            let desc = format!("list dir: {}", path);
+            if !prompt_confirm(&desc, tx, confirm_rx).await { return "denied".into(); }
+            match std::fs::read_dir(path) {
+                Ok(entries) => {
+                    let mut names: Vec<String> = entries
+                        .filter_map(|e| e.ok())
+                        .map(|e| {
+                            let name = e.file_name().to_string_lossy().to_string();
+                            if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                                format!("{}/", name)
+                            } else {
+                                name
+                            }
+                        })
+                        .collect();
+                    names.sort();
+                    tx.send(StreamEvent::Delta(format!("← _listed {} entries_\n", names.len())))
+                        .await.ok();
+                    names.join("\n")
+                }
+                Err(e) => format!("error: {}", e),
+            }
+        }
+        "search_files" => {
+            let path = input["path"].as_str().unwrap_or(".");
+            let pattern = input["pattern"].as_str().unwrap_or("");
+            let desc = format!("search '{}' in {}", pattern, path);
+            if !prompt_confirm(&desc, tx, confirm_rx).await { return "denied".into(); }
+            let cmd = format!(
+                "grep -rn --include='*' '{}' '{}' 2>/dev/null | head -200",
+                pattern.replace('\'', "'\\''"),
+                path.replace('\'', "'\\''"),
+            );
+            match tokio::process::Command::new("sh").arg("-c").arg(&cmd).output().await {
+                Ok(out) => {
+                    let result = String::from_utf8_lossy(&out.stdout).to_string();
+                    tx.send(StreamEvent::Delta(format!("← _search: {} bytes_\n", result.len())))
+                        .await.ok();
+                    if result.is_empty() { "no matches".into() } else { result }
+                }
+                Err(e) => format!("error: {}", e),
+            }
+        }
+        "run_shell" => {
+            let command = input["command"].as_str().unwrap_or("");
+            let desc = format!("$ {}", command);
+            if !prompt_confirm(&desc, tx, confirm_rx).await { return "denied".into(); }
+            match tokio::process::Command::new("sh").arg("-c").arg(command).output().await {
+                Ok(out) => {
+                    let stdout = String::from_utf8_lossy(&out.stdout);
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    let combined = if stderr.is_empty() {
+                        stdout.to_string()
+                    } else {
+                        format!("{}\nstderr:\n{}", stdout, stderr)
+                    };
+                    let truncated = truncate(&combined, 20_000);
+                    tx.send(StreamEvent::Delta(format!("← _exit {}, {} bytes_\n", out.status.code().unwrap_or(-1), truncated.len())))
+                        .await.ok();
+                    truncated
+                }
+                Err(e) => format!("error: {}", e),
+            }
+        }
+        "fetch_url" => {
+            let url = input["url"].as_str().unwrap_or("");
+            let desc = format!("fetch {}", url);
+            if !prompt_confirm(&desc, tx, confirm_rx).await { return "denied".into(); }
+            match Client::new().get(url).send().await {
+                Ok(resp) => {
+                    let status = resp.status();
+                    match resp.text().await {
+                        Ok(body) => {
+                            let truncated = truncate(&body, 50_000);
+                            tx.send(StreamEvent::Delta(format!("← _HTTP {}, {} bytes_\n", status, truncated.len())))
+                                .await.ok();
+                            truncated
+                        }
+                        Err(e) => format!("error reading body: {}", e),
+                    }
+                }
+                Err(e) => format!("error: {}", e),
+            }
+        }
         _ => format!("unknown tool: {}", name),
+    }
+}
+
+async fn prompt_confirm(
+    desc: &str,
+    tx: &mpsc::Sender<StreamEvent>,
+    confirm_rx: &mut mpsc::Receiver<bool>,
+) -> bool {
+    tx.send(StreamEvent::ConfirmRequest(desc.to_string())).await.ok();
+    confirm_rx.recv().await.unwrap_or(false)
+}
+
+fn truncate(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        s.to_string()
+    } else {
+        format!("{}\n... (truncated)", &s[..max_bytes])
     }
 }
 
 fn tool_hint(name: &str, input: &Value) -> String {
     match name {
-        "read_file" | "write_file" => input["path"].as_str().unwrap_or("?").to_string(),
+        "read_file" | "write_file" | "append_file" | "list_dir" => {
+            input["path"].as_str().unwrap_or("?").to_string()
+        }
+        "run_shell" => input["command"].as_str().unwrap_or("?").to_string(),
+        "fetch_url" => input["url"].as_str().unwrap_or("?").to_string(),
+        "search_files" => format!(
+            "'{}' in {}",
+            input["pattern"].as_str().unwrap_or("?"),
+            input["path"].as_str().unwrap_or("?")
+        ),
         _ => String::new(),
     }
 }
 
-// ── Anthropic tool definitions ────────────────────────────────────────────────
-// Uses "input_schema" key per Anthropic spec.
+// ── Tool definitions ──────────────────────────────────────────────────────────
 
 fn anthropic_tool_defs() -> Vec<Value> {
     vec![
@@ -98,42 +233,69 @@ fn anthropic_tool_defs() -> Vec<Value> {
                 "required": ["path", "content"]
             }
         }),
+        json!({
+            "name": "append_file",
+            "description": "Append content to the end of a file, creating it if it doesn't exist.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "path":    { "type": "string" },
+                    "content": { "type": "string" }
+                },
+                "required": ["path", "content"]
+            }
+        }),
+        json!({
+            "name": "list_dir",
+            "description": "List files and directories at the given path.",
+            "input_schema": {
+                "type": "object",
+                "properties": { "path": { "type": "string" } },
+                "required": ["path"]
+            }
+        }),
+        json!({
+            "name": "search_files",
+            "description": "Search for a text pattern in files under a directory. Returns matching lines with file paths and line numbers.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "path":    { "type": "string" },
+                    "pattern": { "type": "string" }
+                },
+                "required": ["path", "pattern"]
+            }
+        }),
+        json!({
+            "name": "run_shell",
+            "description": "Execute a shell command and return stdout and stderr. Requires user approval.",
+            "input_schema": {
+                "type": "object",
+                "properties": { "command": { "type": "string" } },
+                "required": ["command"]
+            }
+        }),
+        json!({
+            "name": "fetch_url",
+            "description": "Fetch the contents of a URL via HTTP GET. Requires user approval.",
+            "input_schema": {
+                "type": "object",
+                "properties": { "url": { "type": "string" } },
+                "required": ["url"]
+            }
+        }),
     ]
 }
 
-// ── OpenAI tool definitions ───────────────────────────────────────────────────
-// Same tools, different schema key ("parameters" instead of "input_schema")
-// and wrapped in {"type":"function","function":{...}}.
-
 fn openai_tool_defs() -> Vec<Value> {
     vec![
-        json!({
-            "type": "function",
-            "function": {
-                "name": "read_file",
-                "description": "Read the contents of a file at the given path.",
-                "parameters": {
-                    "type": "object",
-                    "properties": { "path": { "type": "string" } },
-                    "required": ["path"]
-                }
-            }
-        }),
-        json!({
-            "type": "function",
-            "function": {
-                "name": "write_file",
-                "description": "Write content to a file, creating or overwriting it.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path":    { "type": "string" },
-                        "content": { "type": "string" }
-                    },
-                    "required": ["path", "content"]
-                }
-            }
-        }),
+        json!({"type":"function","function":{"name":"read_file","description":"Read the contents of a file at the given path.","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}}),
+        json!({"type":"function","function":{"name":"write_file","description":"Write content to a file, creating or overwriting it.","parameters":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}}}),
+        json!({"type":"function","function":{"name":"append_file","description":"Append content to the end of a file.","parameters":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}}}),
+        json!({"type":"function","function":{"name":"list_dir","description":"List files and directories at the given path.","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}}),
+        json!({"type":"function","function":{"name":"search_files","description":"Search for a text pattern in files under a directory.","parameters":{"type":"object","properties":{"path":{"type":"string"},"pattern":{"type":"string"}},"required":["path","pattern"]}}}),
+        json!({"type":"function","function":{"name":"run_shell","description":"Execute a shell command and return stdout and stderr.","parameters":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}}}),
+        json!({"type":"function","function":{"name":"fetch_url","description":"Fetch the contents of a URL via HTTP GET.","parameters":{"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}}}),
     ]
 }
 
@@ -144,8 +306,9 @@ pub async fn stream_anthropic(
     model: String,
     messages: Vec<Value>,
     tx: mpsc::Sender<StreamEvent>,
+    mut confirm_rx: mpsc::Receiver<bool>,
 ) {
-    if let Err(e) = anthropic_loop(api_key, model, messages, &tx).await {
+    if let Err(e) = anthropic_loop(api_key, model, messages, &tx, &mut confirm_rx).await {
         tx.send(StreamEvent::Error(e.to_string())).await.ok();
     }
 }
@@ -155,6 +318,7 @@ async fn anthropic_loop(
     model: String,
     initial_messages: Vec<Value>,
     tx: &mpsc::Sender<StreamEvent>,
+    confirm_rx: &mut mpsc::Receiver<bool>,
 ) -> anyhow::Result<()> {
     let client = Client::new();
     let mut all_messages = initial_messages;
@@ -205,7 +369,7 @@ async fn anthropic_loop(
         let mut results: Vec<Value> = Vec::new();
         for tc in &calls {
             let input: Value = serde_json::from_str(&tc.input_json).unwrap_or(Value::Null);
-            let output = run_tool(&tc.name, &input, tx).await;
+            let output = run_tool(&tc.name, &input, tx, confirm_rx).await;
             results.push(json!({"type": "tool_result", "tool_use_id": tc.id, "content": output}));
         }
         let results_msg = json!({"role": "user", "content": results});
@@ -296,7 +460,7 @@ async fn collect_anthropic_stream(
     Ok((text, calls))
 }
 
-// ── OpenAI-compatible streaming (Groq, Together, OpenAI, Ollama…) ─────────────
+// ── OpenAI-compatible streaming ───────────────────────────────────────────────
 
 pub async fn stream_openai_compat(
     base_url: String,
@@ -304,8 +468,9 @@ pub async fn stream_openai_compat(
     model: String,
     messages: Vec<Value>,
     tx: mpsc::Sender<StreamEvent>,
+    mut confirm_rx: mpsc::Receiver<bool>,
 ) {
-    if let Err(e) = openai_loop(base_url, api_key, model, messages, &tx).await {
+    if let Err(e) = openai_loop(base_url, api_key, model, messages, &tx, &mut confirm_rx).await {
         tx.send(StreamEvent::Error(e.to_string())).await.ok();
     }
 }
@@ -316,6 +481,7 @@ async fn openai_loop(
     model: String,
     initial_messages: Vec<Value>,
     tx: &mpsc::Sender<StreamEvent>,
+    confirm_rx: &mut mpsc::Receiver<bool>,
 ) -> anyhow::Result<()> {
     let client = Client::new();
     let mut all_messages = initial_messages;
@@ -349,7 +515,6 @@ async fn openai_loop(
             break;
         }
 
-        // OpenAI format: tool_calls array at the top level of the assistant message
         let tool_calls_json: Vec<Value> = calls.iter().map(|tc| json!({
             "id": tc.id,
             "type": "function",
@@ -364,10 +529,9 @@ async fn openai_loop(
         all_messages.push(assistant_msg.clone());
         new_msgs.push(assistant_msg);
 
-        // OpenAI format: one "tool" role message per result (vs Anthropic's single user message)
         for tc in &calls {
             let args: Value = serde_json::from_str(&tc.arguments).unwrap_or(Value::Null);
-            let output = run_tool(&tc.name, &args, tx).await;
+            let output = run_tool(&tc.name, &args, tx, confirm_rx).await;
             let tool_msg = json!({
                 "role": "tool",
                 "tool_call_id": tc.id,
@@ -414,7 +578,6 @@ async fn collect_openai_stream(
 
             let choice = &v["choices"][0];
 
-            // Text delta
             if let Some(content) = choice["delta"]["content"].as_str() {
                 if !content.is_empty() {
                     text.push_str(content);
@@ -422,7 +585,6 @@ async fn collect_openai_stream(
                 }
             }
 
-            // Tool call deltas — arguments stream in across many chunks
             if let Some(tc_deltas) = choice["delta"]["tool_calls"].as_array() {
                 for delta in tc_deltas {
                     let idx = delta["index"].as_u64().unwrap_or(0) as usize;
@@ -446,7 +608,6 @@ async fn collect_openai_stream(
                 }
             }
 
-            // finish_reason signals all tool arguments are complete — show hints
             if choice["finish_reason"] == "tool_calls" {
                 for tc in &calls {
                     let args: Value =
