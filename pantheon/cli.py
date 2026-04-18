@@ -15,7 +15,10 @@ console = Console()
 
 
 @app.callback(invoke_without_command=True)
-def default(ctx: typer.Context):
+def default(
+    ctx: typer.Context,
+    tools: bool = typer.Option(False, "--tools", "-t", help="Enable filesystem tools (read-only, cwd-scoped)."),
+):
     """Start a chat session (default command)."""
     if ctx.invoked_subcommand is not None:
         return
@@ -26,7 +29,7 @@ def default(ctx: typer.Context):
             raise typer.Exit(1)
 
     from pantheon.chat import run
-    run()
+    run(tools_enabled=tools)
 
 
 @auth_app.command("add")
