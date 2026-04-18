@@ -1,6 +1,6 @@
+import getpass
 from rich.console import Console
-from rich.prompt import Prompt, Confirm
-from rich import print as rprint
+from rich.table import Table
 import typer
 
 from pantheon.config import PROVIDERS, TIER_ORDER, save_credential, save_config, load_config
@@ -8,21 +8,22 @@ from pantheon.config import PROVIDERS, TIER_ORDER, save_credential, save_config,
 console = Console()
 
 
-def onboard():
-    """First-run setup wizard."""
+def onboard() -> bool:
+    """First-run setup wizard. Returns True if at least one provider was added."""
     console.print("\n[bold yellow]Welcome to Pantheon.[/bold yellow]")
     console.print("Let's add your first provider.\n")
-    console.print("Pantheon routes your chats to the cheapest capable model.")
+    console.print("Pantheon routes chats to the cheapest capable model.")
     console.print("Starting with a [bold]free tier[/bold] provider is recommended.\n")
 
     added = _provider_selection_prompt()
 
     if not added:
         console.print("\n[red]No providers added. Run [bold]pan auth add[/bold] to set one up.[/red]")
-        raise typer.Exit(1)
+        return False
 
     console.print(f"\n[bold green]✓ You're set up with {len(added)} provider(s).[/bold green]")
     console.print("Add more anytime with: [bold]pan auth add[/bold]\n")
+    return True
 
 
 def add_provider():
@@ -33,35 +34,40 @@ def add_provider():
 
 
 def _provider_selection_prompt() -> list[str]:
-    from InquirerPy import inquirer
+    sorted_providers = sorted(PROVIDERS.items(), key=lambda x: TIER_ORDER.index(x[1]["tier"]))
 
-    choices = [
-        {
-            "name": f"{meta['label']}  ({meta['tier']})",
-            "value": pid,
-            "enabled": meta["tier"] == "free",
-        }
-        for pid, meta in sorted(
-            PROVIDERS.items(), key=lambda x: TIER_ORDER.index(x[1]["tier"])
-        )
-    ]
+    console.print("[bold]Available providers:[/bold]\n")
+    for i, (pid, meta) in enumerate(sorted_providers, 1):
+        console.print(f"  [{i}] {meta['label']:<25} ({meta['tier']})")
 
-    selected = inquirer.checkbox(
-        message="Which providers do you want to add? (space to select, enter to confirm)",
-        choices=choices,
-    ).execute()
+    console.print()
+    raw = input("Select providers (e.g. 1 or 1,3): ").strip()
+
+    if not raw:
+        return []
+
+    selected_indices = []
+    for part in raw.replace(",", " ").split():
+        try:
+            idx = int(part) - 1
+            if 0 <= idx < len(sorted_providers):
+                selected_indices.append(idx)
+        except ValueError:
+            pass
 
     added = []
-    for provider_id in selected:
-        meta = PROVIDERS[provider_id]
+    for idx in selected_indices:
+        provider_id, meta = sorted_providers[idx]
         console.print(f"\n[bold]{meta['label']}[/bold]")
-        console.print(f"Get your API key at: [link]{meta['key_url']}[/link]")
-        key = Prompt.ask(f"Paste your {meta['env_key']}", password=True)
-        if key.strip():
-            save_credential(meta["env_key"], key.strip())
+        console.print(f"  Get your API key at: {meta['key_url']}")
+        key = input(f"  Paste your {meta['env_key']}: ").strip()
+        if len(key) > 20:
+            save_credential(meta["env_key"], key)
             _enable_provider(provider_id)
             added.append(provider_id)
-            console.print(f"[green]✓ Saved[/green]")
+            console.print(f"  [green]✓ Saved[/green]")
+        else:
+            console.print(f"  [dim]Skipped (key too short — not saved)[/dim]")
 
     return added
 
@@ -85,6 +91,11 @@ def list_providers():
     for pid, meta in PROVIDERS.items():
         has_key = bool(creds.get(meta["env_key"]))
         is_active = pid in active
-        status = "[green]✓ active[/green]" if is_active else ("[yellow]key set[/yellow]" if has_key else "[dim]not configured[/dim]")
+        if is_active:
+            status = "[green]✓ active[/green]"
+        elif has_key:
+            status = "[yellow]key set[/yellow]"
+        else:
+            status = "[dim]not configured[/dim]"
         console.print(f"  {meta['label']:<25} {meta['tier']:<8} {status}")
     console.print()

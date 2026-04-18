@@ -21,9 +21,9 @@ def default(ctx: typer.Context):
         return
 
     if not is_configured():
-        console.print("[yellow]No providers configured.[/yellow]")
         from pantheon.auth import onboard
-        onboard()
+        if not onboard():
+            raise typer.Exit(1)
 
     from pantheon.chat import run
     run()
