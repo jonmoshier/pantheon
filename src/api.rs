@@ -16,6 +16,88 @@ struct ToolCall {
     input_json: String,
 }
 
+/// OpenAI-compatible streaming (Groq, Together, OpenAI, Ollama, etc.).
+/// Same wire format everywhere — only base_url and the Authorization header change.
+pub async fn stream_openai_compat(
+    base_url: String,
+    api_key: String,
+    model: String,
+    messages: Vec<Value>,
+    tx: mpsc::Sender<StreamEvent>,
+) {
+    if let Err(e) = openai_loop(base_url, api_key, model, messages, &tx).await {
+        tx.send(StreamEvent::Error(e.to_string())).await.ok();
+    }
+}
+
+async fn openai_loop(
+    base_url: String,
+    api_key: String,
+    model: String,
+    messages: Vec<Value>,
+    tx: &mpsc::Sender<StreamEvent>,
+) -> anyhow::Result<()> {
+    let client = Client::new();
+
+    let resp = client
+        .post(format!("{}/chat/completions", base_url))
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("content-type", "application/json")
+        .json(&json!({
+            "model": model,
+            "messages": messages,
+            "stream": true,
+        }))
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        tx.send(StreamEvent::Error(format!("{}: {}", status, body))).await.ok();
+        return Ok(());
+    }
+
+    let mut stream = resp.bytes_stream();
+    let mut buf = String::new();
+    let mut text = String::new();
+
+    'outer: while let Some(chunk) = stream.next().await {
+        buf.push_str(&String::from_utf8_lossy(&chunk?));
+        while let Some(pos) = buf.find('\n') {
+            let line = buf[..pos].trim().to_string();
+            buf = buf[pos + 1..].to_string();
+
+            let data = match line.strip_prefix("data: ") {
+                Some(d) => d,
+                None => continue,
+            };
+
+            if data == "[DONE]" {
+                break 'outer;
+            }
+
+            if let Ok(v) = serde_json::from_str::<Value>(data) {
+                if let Some(content) = v["choices"][0]["delta"]["content"].as_str() {
+                    if !content.is_empty() {
+                        text.push_str(content);
+                        tx.send(StreamEvent::Delta(content.to_string())).await.ok();
+                    }
+                }
+            }
+        }
+    }
+
+    // Record the assistant turn so subsequent messages in the same session include it
+    tx.send(StreamEvent::ApiHistory(vec![
+        json!({"role": "assistant", "content": text}),
+    ]))
+    .await
+    .ok();
+    tx.send(StreamEvent::Done).await.ok();
+    Ok(())
+}
+
 pub async fn stream_anthropic(
     api_key: String,
     model: String,

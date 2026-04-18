@@ -5,15 +5,40 @@ use ratatui::style::{Color, Modifier, Style};
 
 use crate::api::StreamEvent;
 
+/// Which API format and endpoint a model uses.
+/// OpenAiCompat covers Groq, Together, Ollama, OpenAI — same wire format, different URL + key.
+#[derive(Clone, Copy)]
+pub enum Provider {
+    Anthropic,
+    OpenAiCompat { base_url: &'static str, env_key: &'static str },
+}
+
 pub struct Model {
     pub label: &'static str,
     pub id: &'static str,
+    pub provider: Provider,
 }
 
 pub const MODELS: &[Model] = &[
-    Model { label: "Claude Haiku", id: "claude-haiku-4-5-20251001" },
-    Model { label: "Claude Sonnet", id: "claude-sonnet-4-6" },
-    Model { label: "Claude Opus", id: "claude-opus-4-7" },
+    Model { label: "Claude Haiku",   id: "claude-haiku-4-5-20251001",    provider: Provider::Anthropic },
+    Model { label: "Claude Sonnet",  id: "claude-sonnet-4-6",            provider: Provider::Anthropic },
+    Model { label: "Claude Opus",    id: "claude-opus-4-7",              provider: Provider::Anthropic },
+    Model {
+        label: "Groq Llama 3.3 70B",
+        id: "llama-3.3-70b-versatile",
+        provider: Provider::OpenAiCompat {
+            base_url: "https://api.groq.com/openai/v1",
+            env_key:  "GROQ_API_KEY",
+        },
+    },
+    Model {
+        label: "Groq Llama 3.1 8B",
+        id: "llama-3.1-8b-instant",
+        provider: Provider::OpenAiCompat {
+            base_url: "https://api.groq.com/openai/v1",
+            env_key:  "GROQ_API_KEY",
+        },
+    },
 ];
 
 pub enum Role {
@@ -148,10 +173,21 @@ impl App {
             return;
         }
 
-        let api_key = match self.api_key.clone() {
+        let provider = self.model().provider;
+
+        // Resolve the API key for whichever provider we're using
+        let api_key = match provider {
+            Provider::Anthropic => self.api_key.clone(),
+            Provider::OpenAiCompat { env_key, .. } => crate::config::load_api_key(env_key),
+        };
+        let api_key = match api_key {
             Some(k) => k,
             None => {
-                self.push_system("No API key — set ANTHROPIC_API_KEY".into());
+                let hint = match provider {
+                    Provider::Anthropic => "ANTHROPIC_API_KEY",
+                    Provider::OpenAiCompat { env_key, .. } => env_key,
+                };
+                self.push_system(format!("No API key — set {}", hint));
                 return;
             }
         };
@@ -161,19 +197,43 @@ impl App {
             content: text.clone(),
             model_label: None,
         });
-        self.api_history.push(json!({"role": "user", "content": text}));
         self.auto_scroll = true;
+
+        // Anthropic uses api_history (preserves tool-use turns in native format).
+        // OpenAI-compat providers get simple role+content pairs rebuilt from display messages
+        // since they don't share the same history format.
+        let msgs: Vec<Value> = match provider {
+            Provider::Anthropic => {
+                self.api_history.push(json!({"role": "user", "content": text}));
+                self.api_history.clone()
+            }
+            Provider::OpenAiCompat { .. } => {
+                self.messages.iter()
+                    .filter(|m| matches!(m.role, Role::User | Role::Assistant))
+                    .map(|m| json!({
+                        "role": if matches!(m.role, Role::User) { "user" } else { "assistant" },
+                        "content": m.content,
+                    }))
+                    .collect()
+            }
+        };
 
         let (tx, rx) = mpsc::channel(256);
         self.stream_rx = Some(rx);
         self.streaming = true;
 
         let model = self.model().id.to_string();
-        let msgs = self.api_history.clone();
-
-        let handle = tokio::spawn(async move {
-            crate::api::stream_anthropic(api_key, model, msgs, tx).await;
-        });
+        let handle = match provider {
+            Provider::Anthropic => tokio::spawn(async move {
+                crate::api::stream_anthropic(api_key, model, msgs, tx).await;
+            }),
+            Provider::OpenAiCompat { base_url, .. } => {
+                let base_url = base_url.to_string();
+                tokio::spawn(async move {
+                    crate::api::stream_openai_compat(base_url, api_key, model, msgs, tx).await;
+                })
+            }
+        };
         self.stream_handle = Some(handle);
     }
 
