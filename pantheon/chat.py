@@ -104,7 +104,7 @@ def run(tools_enabled: bool = False):
             app.invalidate()
 
     # Banner — populate directly since app doesn't exist yet
-    hints = "/model  ·  /quit"
+    hints = "/model  ·  /help  ·  /quit"
     if tools_enabled:
         hints += f"  ·  tools on  ·  {root}"
     output_fragments.append(("class:banner-title", "  Pantheon\n"))
@@ -128,6 +128,15 @@ def run(tools_enabled: bool = False):
 
         if lower in ("/quit", "/exit"):
             app.exit()
+            return True
+
+        if lower in ("/help", "/h", "/?"):
+            append("\n  Available commands:\n\n", "class:banner-hint")
+            append("  /model              view and manage available providers\n", "class:banner-hint")
+            append("  /model auto         switch to auto-routing mode\n", "class:banner-hint")
+            append("  /model <id>         pin to a specific provider\n", "class:banner-hint")
+            append("  /help               show this message\n", "class:banner-hint")
+            append("  /quit, /exit        exit the chat\n\n", "class:banner-hint")
             return True
 
         if lower.startswith("/model"):
@@ -266,6 +275,7 @@ def run(tools_enabled: bool = False):
         follow_up = litellm.completion(
             model=model,
             messages=history,
+            tools=TOOLS,
             stream=True,
             api_key=api_key,
         )
