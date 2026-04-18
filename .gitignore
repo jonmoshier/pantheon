@@ -1,12 +1,5 @@
-# Python
-__pycache__/
-*.py[cod]
-*.egg-info/
-dist/
-build/
-.venv/
-venv/
-*.egg
+# Rust
+/target/
 
 # Credentials — never commit these
 .pantheon/
