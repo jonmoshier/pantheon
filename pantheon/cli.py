@@ -1,4 +1,6 @@
 import typer
+import sys
+import os
 from rich.console import Console
 
 from pantheon.config import is_configured
@@ -18,6 +20,8 @@ console = Console()
 def default(
     ctx: typer.Context,
     tools: bool = typer.Option(False, "--tools", "-t", help="Enable filesystem tools (read-only, cwd-scoped)."),
+    debug: bool = typer.Option(False, "--debug", "-d", help="Log errors and API details to ~/.pantheon/debug.log."),
+    autoreload: bool = typer.Option(False, "--autoreload", help="Enable autoreload on file changes."),
 ):
     """Start a chat session (default command)."""
     if ctx.invoked_subcommand is not None:
@@ -29,7 +33,57 @@ def default(
             raise typer.Exit(1)
 
     from pantheon.chat import run
-    run(tools_enabled=tools)
+    
+    if autoreload:
+        run_with_autoreload(tools_enabled=tools, debug=debug)
+    else:
+        run(tools_enabled=tools, debug=debug)
+
+
+def run_with_autoreload(tools_enabled: bool, debug: bool):
+    """Run the chat with autoreload on file changes."""
+    import time
+    import importlib
+    
+    watched_dir = os.path.dirname(os.path.abspath(__file__))
+    last_modified = {}
+    
+    console.print("[yellow]Autoreload enabled. Watching for changes...[/yellow]")
+    
+    while True:
+        try:
+            # Check for file changes
+            has_changes = False
+            for root, dirs, files in os.walk(watched_dir):
+                for file in files:
+                    if file.endswith('.py'):
+                        filepath = os.path.join(root, file)
+                        mtime = os.path.getmtime(filepath)
+                        if filepath not in last_modified or last_modified[filepath] != mtime:
+                            last_modified[filepath] = mtime
+                            has_changes = True
+                            console.print(f"[green]File changed: {filepath}[/green]")
+            
+            if has_changes:
+                # Reload modules
+                for module_name in list(sys.modules.keys()):
+                    if module_name.startswith('pantheon'):
+                        try:
+                            importlib.reload(sys.modules[module_name])
+                        except Exception as e:
+                            console.print(f"[red]Error reloading {module_name}: {e}[/red]")
+                console.print("[yellow]Modules reloaded. Restarting chat...[/yellow]")
+            
+            from pantheon.chat import run
+            run(tools_enabled=tools_enabled, debug=debug)
+            break
+            
+        except KeyboardInterrupt:
+            console.print("[yellow]Autoreload stopped.[/yellow]")
+            break
+        except Exception as e:
+            console.print(f"[red]Error: {e}[/red]")
+            time.sleep(1)
 
 
 @auth_app.command("add")
