@@ -1,20 +1,18 @@
 import json
 import os
-import threading
 from pathlib import Path
 
 import litellm
-from prompt_toolkit import Application
-from prompt_toolkit.data_structures import Point
-from prompt_toolkit.layout import Layout, HSplit, Window
-from prompt_toolkit.layout.controls import FormattedTextControl
-from prompt_toolkit.layout.margins import ScrollbarMargin
-from prompt_toolkit.widgets import TextArea
-from prompt_toolkit.key_binding import KeyBindings
+from rich.text import Text
+from textual import work
+from textual.app import App, ComposeResult
+from textual.binding import Binding
+from textual.containers import Horizontal
+from textual.screen import ModalScreen
+from textual.widgets import Input, Label, RichLog, Static
 
 from pantheon.config import load_credentials, PROVIDERS, enabled_providers
 from pantheon.router import pick_model
-from pantheon.theme import get_style
 from pantheon.tools import TOOLS, execute_tool
 
 litellm.suppress_debug_info = True
@@ -45,191 +43,277 @@ def _api_key_for(provider_id: str, creds: dict) -> str | None:
     return creds.get(PROVIDERS[provider_id]["env_key"])
 
 
-def run(tools_enabled: bool = False):
-    creds = _load_creds()
-    root = Path.cwd()
-    (Path.home() / ".pantheon").mkdir(exist_ok=True)
+class ConfirmModal(ModalScreen[bool]):
+    DEFAULT_CSS = """
+    ConfirmModal {
+        align: center middle;
+    }
+    #dialog {
+        padding: 1 2;
+        border: solid #555555;
+        background: #1a1a1a;
+        width: 70;
+        height: auto;
+    }
+    #confirm-label {
+        color: #ce9178;
+        margin-bottom: 1;
+    }
+    """
 
-    history: list[dict] = []
-    pinned_provider: str | None = None
-    is_processing = False
-    awaiting_confirmation = False
-    _confirm_event = threading.Event()
-    _confirm_result = [False]
+    def __init__(self, name: str, args: dict) -> None:
+        super().__init__()
+        self._name = name
+        self._args = args
 
-    # Output as styled fragments — (style_class, text) pairs
-    # List append is atomic in CPython so background-thread writes are safe
-    output_fragments: list[tuple[str, str]] = []
+    def compose(self) -> ComposeResult:
+        args_str = "  ".join(f"{k}={v}" for k, v in self._args.items())
+        with Static(id="dialog"):
+            yield Label(f"  {self._name}  {args_str}", id="confirm-label")
+            yield Input(placeholder="y/N", id="confirm-input")
 
-    def get_output():
-        return output_fragments
+    def on_mount(self) -> None:
+        self.query_one("#confirm-input", Input).focus()
 
-    def get_cursor_position():
-        # Always point to the last line so the window stays scrolled to the bottom
-        row = sum(t.count("\n") for _, t in output_fragments)
-        return Point(x=0, y=row)
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self.dismiss(event.value.strip().lower() in ("y", "yes"))
 
-    output_window = Window(
-        content=FormattedTextControl(
-            text=get_output,
-            get_cursor_position=get_cursor_position,
-            focusable=False,
-        ),
-        wrap_lines=True,
-        right_margins=[ScrollbarMargin(display_arrows=False)],
-    )
+    def on_key(self, event) -> None:
+        if event.key == "escape":
+            self.dismiss(False)
 
-    def get_status():
-        label = PROVIDERS[pinned_provider]["label"] if pinned_provider else "auto"
-        frags = [("class:status-model", f"  {label}")]
-        if tools_enabled:
-            frags.append(("class:status-hint", "  ·  tools on"))
-        return frags
 
-    status_window = Window(
-        content=FormattedTextControl(get_status, focusable=False),
-        height=1,
-    )
+class PantheonApp(App):
+    CSS = """
+    Screen {
+        background: #0d0d0d;
+        layers: base overlay;
+    }
+    #output {
+        height: 1fr;
+        min-height: 3;
+        padding: 0 1;
+        scrollbar-color: #333333;
+        scrollbar-background: transparent;
+    }
+    #streaming {
+        height: auto;
+        padding: 0 2;
+        color: #d4d4d4;
+    }
+    #status-bar {
+        height: 1;
+        background: #111111;
+        color: #888888;
+        padding: 0 2;
+    }
+    #input-row {
+        height: 3;
+        border-top: solid #333333;
+        background: #0d0d0d;
+    }
+    #prompt-label {
+        width: auto;
+        padding: 1 0 1 1;
+        color: #569cd6;
+        text-style: bold;
+    }
+    #chat-input {
+        width: 1fr;
+        border: none;
+        background: transparent;
+        color: #d4d4d4;
+        padding: 1 0;
+    }
+    """
 
-    input_field = TextArea(
-        prompt="  you ›  ",
-        multiline=False,
-        wrap_lines=True,
-        height=1,
-    )
+    BINDINGS = [
+        Binding("ctrl+c", "quit_app", "Quit", priority=True),
+        Binding("ctrl+d", "quit_app", "Quit", priority=True),
+    ]
 
-    def append(text: str, style: str = "class:assistant") -> None:
-        if text:
-            output_fragments.append((style, text))
-            app.invalidate()
+    def __init__(self, creds: dict, tools_enabled: bool, root: Path) -> None:
+        super().__init__()
+        self.creds = creds
+        self.tools_enabled = tools_enabled
+        self.root = root
+        self.history: list[dict] = []
+        self.pinned_provider: str | None = None
+        self.is_processing = False
 
-    # Banner — populate directly since app doesn't exist yet
-    hints = "/model  ·  /help  ·  /quit"
-    if tools_enabled:
-        hints += f"  ·  tools on  ·  {root}"
-    output_fragments.append(("class:banner-title", "  Pantheon\n"))
-    output_fragments.append(("class:banner-hint", f"  {hints}\n\n"))
+    def compose(self) -> ComposeResult:
+        yield RichLog(id="output", wrap=True, markup=True, highlight=False)
+        yield Static("", id="streaming")
+        yield Static("  auto", id="status-bar")
+        with Horizontal(id="input-row"):
+            yield Label("  you ›  ", id="prompt-label")
+            yield Input(id="chat-input")
 
-    def request_confirmation(name: str, args: dict) -> bool:
-        nonlocal awaiting_confirmation
-        args_str = "  ".join(f"{k}={v}" for k, v in args.items())
-        append(f"\n  {name}  {args_str}\n", "class:tool-pending")
-        append("  run? [y/N]  \n", "class:tool-pending")
-        _confirm_event.clear()
-        awaiting_confirmation = True
-        app.invalidate()
-        _confirm_event.wait()
-        awaiting_confirmation = False
-        return _confirm_result[0]
+    def on_mount(self) -> None:
+        log = self.query_one(RichLog)
+        log.write(Text("  Pantheon", style="bold #cccccc"))
+        hints = "/model  ·  /quit"
+        if self.tools_enabled:
+            hints += f"  ·  tools on  ·  {self.root}"
+        log.write(Text(f"  {hints}", style="#555555"))
+        log.write("")
+        self.query_one("#chat-input", Input).focus()
 
-    def handle_command(cmd: str) -> bool:
-        nonlocal pinned_provider
+    def action_quit_app(self) -> None:
+        self.exit()
+
+    def _update_status(self) -> None:
+        label = PROVIDERS[self.pinned_provider]["label"] if self.pinned_provider else "auto"
+        text = f"  {label}"
+        if self.tools_enabled:
+            text += "  ·  tools on"
+        self.query_one("#status-bar", Static).update(text)
+
+    def _log(self, content: str | Text, style: str = "") -> None:
+        log = self.query_one(RichLog)
+        if isinstance(content, str) and style:
+            log.write(Text(content, style=style))
+        else:
+            log.write(content if content != "" else Text(""))
+
+    async def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id != "chat-input":
+            return
+        user_input = event.value.strip()
+        event.input.clear()
+        if not user_input or self.is_processing:
+            return
+        if await self._handle_command(user_input):
+            return
+        msg = Text("  you  ", style="bold #569cd6")
+        msg.append(user_input, style="#d4d4d4")
+        self._log(msg)
+        self.is_processing = True
+        self._process_message(user_input)
+
+    async def _handle_command(self, cmd: str) -> bool:
         lower = cmd.lower()
 
         if lower in ("/quit", "/exit"):
-            app.exit()
+            self.exit()
             return True
 
         if lower in ("/help", "/h", "/?"):
-            append("\n  Available commands:\n\n", "class:banner-hint")
-            append("  /model              view and manage available providers\n", "class:banner-hint")
-            append("  /model auto         switch to auto-routing mode\n", "class:banner-hint")
-            append("  /model <id>         pin to a specific provider\n", "class:banner-hint")
-            append("  /help               show this message\n", "class:banner-hint")
-            append("  /quit, /exit        exit the chat\n\n", "class:banner-hint")
+            self._log("")
+            self._log("  /model              list providers", "#555555")
+            self._log("  /model auto         auto-routing", "#555555")
+            self._log("  /model <id>         pin to provider", "#555555")
+            self._log("  /quit               exit", "#555555")
+            self._log("")
             return True
 
         if lower.startswith("/model"):
             arg = lower[6:].strip()
             available = enabled_providers()
-
+            self._log("")
             if not arg:
-                current = PROVIDERS[pinned_provider]["label"] if pinned_provider else "auto-route"
-                append(f"\n  model: {current}\n\n", "class:banner-hint")
+                current = PROVIDERS[self.pinned_provider]["label"] if self.pinned_provider else "auto-route"
+                self._log(f"  model: {current}", "#555555")
+                self._log("")
                 for pid in available:
                     meta = PROVIDERS[pid]
-                    marker = "  ←" if pid == pinned_provider else ""
-                    append(f"    {pid:<22} {meta['label']} ({meta['tier']}){marker}\n", "class:banner-hint")
-                append("\n  /model auto      resume auto-routing\n", "class:banner-hint")
-                append("  /model <id>      pin to a provider\n\n", "class:banner-hint")
+                    marker = "  ←" if pid == self.pinned_provider else ""
+                    self._log(f"    {pid:<22} {meta['label']} ({meta['tier']}){marker}", "#555555")
+                self._log("")
+                self._log("  /model auto      resume auto-routing", "#555555")
+                self._log("  /model <id>      pin to a provider", "#555555")
             elif arg == "auto":
-                pinned_provider = None
-                append("\n  Switched to auto-routing.\n\n", "class:banner-hint")
+                self.pinned_provider = None
+                self._update_status()
+                self._log("  Switched to auto-routing.", "#555555")
             elif arg in available:
-                pinned_provider = arg
+                self.pinned_provider = arg
+                self._update_status()
                 meta = PROVIDERS[arg]
-                append(f"\n  Pinned to {meta['label']} ({meta['tier']}).\n\n", "class:banner-hint")
+                self._log(f"  Pinned to {meta['label']} ({meta['tier']}).", "#555555")
             else:
-                append(f"\n  Unknown provider '{arg}'.\n\n", "class:error")
+                self._log(f"  Unknown provider '{arg}'.", "#f44747")
+            self._log("")
             return True
 
         return False
 
-    def process_message(user_input: str) -> None:
-        nonlocal is_processing, pinned_provider
-
-        history.append({"role": "user", "content": user_input})
+    @work
+    async def _process_message(self, user_input: str) -> None:
+        self.history.append({"role": "user", "content": user_input})
         excluded: set[str] = set()
 
         while True:
             try:
-                if pinned_provider:
-                    provider_id = pinned_provider
+                if self.pinned_provider:
+                    provider_id = self.pinned_provider
                     model = PROVIDERS[provider_id]["model"]
                 else:
                     provider_id, model = pick_model(user_input, exclude=excluded)
 
                 meta = PROVIDERS[provider_id]
-                pin_marker = " (pinned)" if pinned_provider else ""
-                append(f"  → {meta['label']} ({meta['tier']}){pin_marker}\n\n", "class:routing")
+                pin_marker = " (pinned)" if self.pinned_provider else ""
+                self._log(f"  → {meta['label']} ({meta['tier']}){pin_marker}", "#555555 italic")
+                self._log("")
 
-                api_key = _api_key_for(provider_id, creds)
+                api_key = _api_key_for(provider_id, self.creds)
 
-                if tools_enabled:
-                    _run_with_tools(model, api_key)
+                if self.tools_enabled:
+                    await self._run_with_tools(model, api_key)
                 else:
-                    _run_streaming(model, api_key)
+                    await self._run_streaming(model, api_key)
 
                 break
 
             except litellm.RateLimitError:
                 excluded.add(provider_id)
-                append(f"  rate limited on {PROVIDERS[provider_id]['label']}", "class:routing")
-                if pinned_provider:
-                    append(" — unpin a provider to enable fallback\n\n", "class:error")
+                msg = Text(f"  rate limited on {PROVIDERS[provider_id]['label']}", style="#555555 italic")
+                if self.pinned_provider:
+                    msg.append(" — unpin to enable fallback", style="#f44747")
+                    self._log(msg)
                     break
                 try:
-                    pick_model(user_input, exclude=excluded)  # probe: any left?
-                    append(", trying next…\n\n", "class:routing")
+                    pick_model(user_input, exclude=excluded)
+                    msg.append(", trying next…", style="#555555 italic")
+                    self._log(msg)
                 except RuntimeError:
-                    append(" — no providers remaining\n\n", "class:error")
+                    msg.append(" — no providers remaining", style="#f44747")
+                    self._log(msg)
                     break
 
             except Exception as e:
-                append(f"\n  error  {e}\n\n", "class:error")
+                self._log(f"  error  {e}", "#f44747")
                 break
 
-        is_processing = False
+        self.is_processing = False
 
-    def _run_streaming(model: str, api_key: str | None) -> None:
-        response = litellm.completion(
+    async def _run_streaming(self, model: str, api_key: str | None) -> None:
+        streaming = self.query_one("#streaming", Static)
+        collected: list[str] = []
+
+        response = await litellm.acompletion(
             model=model,
-            messages=history,
+            messages=self.history,
             stream=True,
             api_key=api_key,
         )
-        collected = []
-        for chunk in response:
-            delta = chunk.choices[0].delta.content or ""
-            collected.append(delta)
-            append(delta, "class:assistant")
-        history.append({"role": "assistant", "content": "".join(collected)})
-        append("\n\n", "class:assistant")
 
-    def _run_with_tools(model: str, api_key: str | None) -> None:
-        response = litellm.completion(
+        async for chunk in response:
+            delta = chunk.choices[0].delta.content or ""
+            if delta:
+                collected.append(delta)
+                streaming.update(Text("".join(collected), style="#d4d4d4"))
+
+        full_response = "".join(collected)
+        streaming.update("")
+        self._log(Text(full_response, style="#d4d4d4"))
+        self._log("")
+        self.history.append({"role": "assistant", "content": full_response})
+
+    async def _run_with_tools(self, model: str, api_key: str | None) -> None:
+        response = await litellm.acompletion(
             model=model,
-            messages=history,
+            messages=self.history,
             tools=TOOLS,
             tool_choice="auto",
             stream=False,
@@ -241,12 +325,12 @@ def run(tools_enabled: bool = False):
 
         if choice.finish_reason != "tool_calls" or not message.tool_calls:
             content = message.content or ""
-            append(content, "class:assistant")
-            history.append({"role": "assistant", "content": content})
-            append("\n\n", "class:assistant")
+            self._log(Text(content, style="#d4d4d4"))
+            self._log("")
+            self.history.append({"role": "assistant", "content": content})
             return
 
-        history.append({
+        self.history.append({
             "role": "assistant",
             "content": message.content,
             "tool_calls": [tc.model_dump() for tc in message.tool_calls],
@@ -255,83 +339,47 @@ def run(tools_enabled: bool = False):
         for tc in message.tool_calls:
             name = tc.function.name
             args = json.loads(tc.function.arguments)
-            confirmed = request_confirmation(name, args)
+            confirmed = await self.push_screen_wait(ConfirmModal(name, args))
 
             if confirmed:
-                result = execute_tool(name, args, root)
-                append("  ✓ done\n", "class:tool-ok")
+                result = execute_tool(name, args, self.root)
+                self._log("  ✓ done", "#4ec9b0")
             else:
                 result = "User declined tool execution."
-                append("  ✗ skipped\n", "class:tool-skip")
+                self._log("  ✗ skipped", "#555555")
 
-            history.append({
+            self.history.append({
                 "role": "tool",
                 "tool_call_id": tc.id,
                 "name": name,
                 "content": result,
             })
 
-        append("\n", "class:assistant")
-        follow_up = litellm.completion(
+        streaming = self.query_one("#streaming", Static)
+        collected: list[str] = []
+
+        follow_up = await litellm.acompletion(
             model=model,
-            messages=history,
+            messages=self.history,
             tools=TOOLS,
             stream=True,
             api_key=api_key,
         )
-        collected = []
-        for chunk in follow_up:
+
+        async for chunk in follow_up:
             delta = chunk.choices[0].delta.content or ""
-            collected.append(delta)
-            append(delta, "class:assistant")
-        history.append({"role": "assistant", "content": "".join(collected)})
-        append("\n\n", "class:assistant")
+            if delta:
+                collected.append(delta)
+                streaming.update(Text("".join(collected), style="#d4d4d4"))
 
-    kb = KeyBindings()
+        full_response = "".join(collected)
+        streaming.update("")
+        self._log(Text(full_response, style="#d4d4d4"))
+        self._log("")
+        self.history.append({"role": "assistant", "content": full_response})
 
-    @kb.add("enter")
-    def on_enter(event):
-        nonlocal is_processing, awaiting_confirmation
 
-        if awaiting_confirmation:
-            answer = input_field.text.strip().lower()
-            input_field.text = ""
-            _confirm_result[0] = answer in ("y", "yes")
-            _confirm_event.set()
-            return
-
-        user_input = input_field.text.strip()
-        if not user_input or is_processing:
-            return
-        input_field.text = ""
-        if handle_command(user_input):
-            return
-        append("  you  ", "class:user-label")
-        append(f"{user_input}\n", "class:assistant")
-        is_processing = True
-        threading.Thread(target=process_message, args=(user_input,), daemon=True).start()
-
-    @kb.add("c-c")
-    @kb.add("c-d")
-    def on_quit(event):
-        app.exit()
-
-    layout = Layout(
-        HSplit([
-            output_window,
-            Window(height=1, char="─", style="class:separator"),
-            status_window,
-            input_field,
-        ]),
-        focused_element=input_field,
-    )
-
-    app = Application(
-        layout=layout,
-        key_bindings=kb,
-        style=get_style(),
-        full_screen=True,
-        mouse_support=True,
-    )
-
-    app.run()
+def run(tools_enabled: bool = False) -> None:
+    creds = _load_creds()
+    (Path.home() / ".pantheon").mkdir(exist_ok=True)
+    PantheonApp(creds=creds, tools_enabled=tools_enabled, root=Path.cwd()).run()
