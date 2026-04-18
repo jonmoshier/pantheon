@@ -1,1 +1,0 @@
-/home/jon/Projects/pantheon/target/debug/pan: /home/jon/Projects/pantheon/src/api.rs /home/jon/Projects/pantheon/src/app.rs /home/jon/Projects/pantheon/src/config.rs /home/jon/Projects/pantheon/src/main.rs /home/jon/Projects/pantheon/src/ui.rs
