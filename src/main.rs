@@ -1,6 +1,7 @@
 mod api;
 mod app;
 mod config;
+mod markdown;
 mod ui;
 
 use anyhow::Result;
@@ -11,6 +12,8 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::{io, time::Duration};
+
+use app::AppMode;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -40,26 +43,49 @@ async fn run(mut app: app::App) -> Result<()> {
         }
 
         if event::poll(Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
-                match (key.modifiers, key.code) {
-                    (KeyModifiers::CONTROL, KeyCode::Char('c'))
-                    | (KeyModifiers::CONTROL, KeyCode::Char('d')) => break,
+            match event::read()? {
+                Event::Key(key) => match &app.mode {
+                    AppMode::Normal => match (key.modifiers, key.code) {
+                        (KeyModifiers::CONTROL, KeyCode::Char('c'))
+                        | (KeyModifiers::CONTROL, KeyCode::Char('d')) => break,
 
-                    (KeyModifiers::NONE, KeyCode::Enter) => app.submit(),
-                    (KeyModifiers::NONE, KeyCode::Backspace) => app.delete_back(),
-                    (KeyModifiers::NONE, KeyCode::Left) => app.move_left(),
-                    (KeyModifiers::NONE, KeyCode::Right) => app.move_right(),
-                    (KeyModifiers::NONE, KeyCode::Home) => app.move_home(),
-                    (KeyModifiers::NONE, KeyCode::End) => app.move_end(),
+                        (KeyModifiers::CONTROL, KeyCode::Char('x')) => {
+                            if app.streaming {
+                                app.cancel_stream();
+                            }
+                        }
 
-                    (KeyModifiers::NONE, KeyCode::Up)
-                    | (KeyModifiers::NONE, KeyCode::PageUp) => app.scroll_up(),
-                    (KeyModifiers::NONE, KeyCode::Down)
-                    | (KeyModifiers::NONE, KeyCode::PageDown) => app.scroll_down(),
+                        // Ctrl+P opens model picker (Ctrl+M = carriage return in terminals)
+                        (KeyModifiers::CONTROL, KeyCode::Char('p')) => {
+                            app.open_model_picker();
+                        }
 
-                    (_, KeyCode::Char(c)) => app.insert_char(c),
-                    _ => {}
-                }
+                        // Plain Enter submits; Alt+Enter inserts a newline
+                        (KeyModifiers::NONE, KeyCode::Enter) => app.submit(),
+                        (KeyModifiers::ALT, KeyCode::Enter) => {
+                            app.textarea.insert_newline();
+                        }
+
+                        (KeyModifiers::NONE, KeyCode::Up)
+                        | (KeyModifiers::NONE, KeyCode::PageUp) => app.scroll_up(),
+
+                        (KeyModifiers::NONE, KeyCode::Down)
+                        | (KeyModifiers::NONE, KeyCode::PageDown) => app.scroll_down(),
+
+                        _ => {
+                            app.textarea.input(key);
+                        }
+                    },
+                    AppMode::ModelSelect => match key.code {
+                        KeyCode::Esc => app.close_model_picker(),
+                        KeyCode::Enter => app.confirm_model_select(),
+                        KeyCode::Up | KeyCode::Char('k') => app.picker_up(),
+                        KeyCode::Down | KeyCode::Char('j') => app.picker_down(),
+                        _ => {}
+                    },
+                },
+                Event::Resize(_, _) => {}
+                _ => {}
             }
         }
     }

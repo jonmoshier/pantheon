@@ -1,67 +1,92 @@
 use ratatui::{
     Frame,
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Wrap},
 };
 
-use crate::app::{App, Role};
+use crate::app::{App, AppMode, Role, MODELS};
 
 const BG: Color = Color::Rgb(13, 13, 13);
-const SURFACE: Color = Color::Rgb(17, 17, 17);
-const BORDER: Color = Color::Rgb(51, 51, 51);
-const DIM: Color = Color::Rgb(85, 85, 85);
+const SURFACE: Color = Color::Rgb(24, 24, 24);
+const BORDER: Color = Color::Rgb(50, 50, 50);
+const BORDER_ACTIVE: Color = Color::Rgb(65, 65, 65);
+const DIM: Color = Color::Rgb(80, 80, 80);
+const SEP_COLOR: Color = Color::Rgb(30, 30, 30);
 const USER_BLUE: Color = Color::Rgb(86, 156, 214);
 const TEXT: Color = Color::Rgb(212, 212, 212);
-const STATUS_FG: Color = Color::Rgb(136, 136, 136);
-const TITLE: Color = Color::Rgb(204, 204, 204);
+const STATUS_FG: Color = Color::Rgb(90, 90, 90);
+const TITLE: Color = Color::Rgb(200, 200, 200);
 const ERROR_RED: Color = Color::Rgb(244, 71, 71);
+
+const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 pub fn render(f: &mut Frame, app: &mut App) {
     let area = f.area();
+
+    // Full-area background
+    f.render_widget(Block::default().style(Style::default().bg(BG)), area);
+
+    // Horizontal padding
+    let content = area.inner(Margin { horizontal: 3, vertical: 0 });
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(3),
             Constraint::Length(1),
-            Constraint::Length(3),
+            Constraint::Length(5), // 4 for box + 1 bottom gap
         ])
-        .split(area);
+        .split(content);
 
-    // ── output ────────────────────────────────────────────────────────────
+    render_messages(f, app, chunks[0]);
+    render_status(f, app, chunks[1]);
+    render_input(f, app, chunks[2]);
 
-    let mut lines: Vec<Line> = Vec::new();
+    if matches!(app.mode, AppMode::ModelSelect) {
+        render_model_picker(f, app);
+    }
+}
+
+fn render_messages(f: &mut Frame, app: &mut App, area: Rect) {
+    let mut lines: Vec<Line<'static>> = Vec::new();
 
     lines.push(Line::from(Span::styled(
-        "  Pantheon",
+        "Pantheon",
         Style::default().fg(TITLE).add_modifier(Modifier::BOLD),
     )));
     lines.push(Line::from(Span::styled(
-        "  /model  ·  /quit",
+        "Ctrl+P model  ·  Ctrl+X cancel  ·  Alt+Enter newline  ·  /quit",
         Style::default().fg(DIM),
     )));
     lines.push(Line::default());
 
+    let sep_width = area.width as usize;
+    let sep = "─".repeat(sep_width.min(120));
+
     for msg in &app.messages {
         match msg.role {
             Role::User => {
-                lines.push(Line::from(vec![
-                    Span::styled("  you  ", Style::default().fg(USER_BLUE).add_modifier(Modifier::BOLD)),
-                    Span::styled(msg.content.clone(), Style::default().fg(TEXT)),
-                ]));
-            }
-            Role::Assistant => {
                 lines.push(Line::from(Span::styled(
-                    format!("  {}", app.model().label),
-                    Style::default().fg(DIM),
+                    "you",
+                    Style::default().fg(USER_BLUE).add_modifier(Modifier::BOLD),
                 )));
                 for text_line in msg.content.lines() {
                     lines.push(Line::from(Span::styled(
                         format!("  {}", text_line),
                         Style::default().fg(TEXT),
                     )));
+                }
+            }
+            Role::Assistant => {
+                let label = msg.model_label.as_deref().unwrap_or("assistant");
+                lines.push(Line::from(Span::styled(
+                    label.to_string(),
+                    Style::default().fg(DIM).add_modifier(Modifier::BOLD),
+                )));
+                for md_line in crate::markdown::to_lines(&msg.content) {
+                    lines.push(indent_line(md_line));
                 }
             }
             Role::System => {
@@ -71,71 +96,119 @@ pub fn render(f: &mut Frame, app: &mut App) {
                     } else {
                         Style::default().fg(DIM)
                     };
-                    lines.push(Line::from(Span::styled(format!("  {}", text_line), style)));
+                    lines.push(Line::from(Span::styled(text_line.to_string(), style)));
                 }
             }
         }
+        lines.push(Line::from(Span::styled(sep.clone(), Style::default().fg(SEP_COLOR))));
         lines.push(Line::default());
     }
 
-    if app.streaming && !app.current_stream.is_empty() {
+    if app.streaming {
+        let spinner = SPINNER[app.spinner_tick as usize % SPINNER.len()];
+        let label = app.model().label;
         lines.push(Line::from(Span::styled(
-            format!("  {}", app.model().label),
-            Style::default().fg(DIM),
+            format!("{} {}", label, spinner),
+            Style::default().fg(DIM).add_modifier(Modifier::BOLD),
         )));
-        for text_line in app.current_stream.lines() {
-            lines.push(Line::from(Span::styled(
-                format!("  {}", text_line),
-                Style::default().fg(TEXT),
-            )));
+        if !app.current_stream.is_empty() {
+            for md_line in crate::markdown::to_lines(&app.current_stream) {
+                lines.push(indent_line(md_line));
+            }
         }
     }
 
     let total = lines.len() as u16;
-    let visible = chunks[0].height;
+    let visible = area.height;
+    let max_scroll = total.saturating_sub(visible);
     let scroll = if app.auto_scroll {
-        total.saturating_sub(visible)
+        max_scroll
     } else {
-        app.scroll_offset.min(total.saturating_sub(visible))
+        app.scroll_offset.min(max_scroll)
     };
-    // Keep scroll_offset in sync so manual scrolling starts from the right place
-    if app.auto_scroll {
-        app.scroll_offset = scroll;
+    app.scroll_offset = scroll;
+
+    f.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default().bg(BG).fg(TEXT))
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0)),
+        area,
+    );
+}
+
+fn render_status(f: &mut Frame, app: &App, area: Rect) {
+    let spinner = SPINNER[app.spinner_tick as usize % SPINNER.len()];
+    let text = if app.streaming {
+        format!("{} {}  streaming", app.model().label, spinner)
+    } else {
+        app.model().label.to_string()
+    };
+    f.render_widget(
+        Paragraph::new(text).style(Style::default().fg(STATUS_FG).bg(BG)),
+        area,
+    );
+}
+
+fn render_input(f: &mut Frame, app: &mut App, area: Rect) {
+    // Leave 1 row bottom gap for the "lifted" look
+    let box_area = Rect::new(area.x, area.y, area.width, area.height.saturating_sub(1));
+
+    let border_color = if app.streaming { BORDER } else { BORDER_ACTIVE };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(border_color))
+        .style(Style::default().bg(SURFACE));
+    let inner = block.inner(box_area);
+    f.render_widget(block, box_area);
+    f.render_widget(&app.textarea, inner);
+}
+
+fn render_model_picker(f: &mut Frame, app: &App) {
+    let popup_width = 38u16;
+    let popup_height = (MODELS.len() + 2) as u16;
+    let area = centered_rect(popup_width, popup_height, f.area());
+
+    f.render_widget(Clear, area);
+
+    let items: Vec<ListItem> = MODELS
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            let (prefix, style) = if i == app.picker_idx {
+                ("  ▸ ", Style::default().fg(USER_BLUE).add_modifier(Modifier::BOLD))
+            } else {
+                ("    ", Style::default().fg(TEXT))
+            };
+            ListItem::new(format!("{}{}", prefix, m.label)).style(style)
+        })
+        .collect();
+
+    let list = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(BORDER_ACTIVE))
+            .style(Style::default().bg(SURFACE))
+            .title(" Select Model ")
+            .title_style(Style::default().fg(DIM)),
+    );
+
+    f.render_widget(list, area);
+}
+
+fn indent_line(line: Line<'static>) -> Line<'static> {
+    if line.spans.is_empty() {
+        return line;
     }
+    let mut spans = vec![Span::raw("  ")];
+    spans.extend(line.spans);
+    Line::from(spans)
+}
 
-    let output = Paragraph::new(lines)
-        .style(Style::default().bg(BG).fg(TEXT))
-        .wrap(Wrap { trim: false })
-        .scroll((scroll, 0));
-    f.render_widget(output, chunks[0]);
-
-    // ── status bar ────────────────────────────────────────────────────────
-
-    let status_text = if app.streaming {
-        format!("  {} · streaming…", app.model().label)
-    } else {
-        format!("  {}", app.model().label)
-    };
-    let status = Paragraph::new(status_text)
-        .style(Style::default().fg(STATUS_FG).bg(SURFACE));
-    f.render_widget(status, chunks[1]);
-
-    // ── input ─────────────────────────────────────────────────────────────
-
-    let input_block = Block::default()
-        .borders(Borders::TOP)
-        .border_style(Style::default().fg(BORDER))
-        .style(Style::default().bg(BG));
-    let inner = input_block.inner(chunks[2]);
-    f.render_widget(input_block, chunks[2]);
-
-    let prefix = "  you >  ";
-    let input_text = format!("{}{}", prefix, app.input);
-    let input_widget = Paragraph::new(input_text)
-        .style(Style::default().fg(TEXT).bg(BG));
-    f.render_widget(input_widget, inner);
-
-    let cursor_x = inner.x + prefix.len() as u16 + app.cursor_col();
-    let cursor_y = inner.y;
-    f.set_cursor_position((cursor_x, cursor_y));
+fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    Rect::new(x, y, width.min(area.width), height.min(area.height))
 }
