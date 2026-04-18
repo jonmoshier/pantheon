@@ -15,14 +15,16 @@ PROVIDERS = {
         "env_key": "GEMINI_API_KEY",
         "key_url": "https://aistudio.google.com/app/apikey",
         "skills": ["speed", "summarization", "routing"],
+        "supports_tools": True,
     },
     "groq-llama": {
         "label": "Groq / Llama 3",
-        "model": "groq/llama3-70b-8192",
+        "model": "groq/llama-3.3-70b-versatile",
         "tier": "free",
         "env_key": "GROQ_API_KEY",
         "key_url": "https://console.groq.com/keys",
         "skills": ["speed", "routing"],
+        "supports_tools": False,
     },
     "claude-haiku": {
         "label": "Claude Haiku",
@@ -31,6 +33,7 @@ PROVIDERS = {
         "env_key": "ANTHROPIC_API_KEY",
         "key_url": "https://console.anthropic.com/settings/keys",
         "skills": ["code", "summarization", "routing"],
+        "supports_tools": True,
     },
     "claude-sonnet": {
         "label": "Claude Sonnet",
@@ -39,6 +42,7 @@ PROVIDERS = {
         "env_key": "ANTHROPIC_API_KEY",
         "key_url": "https://console.anthropic.com/settings/keys",
         "skills": ["code", "reasoning", "creative"],
+        "supports_tools": True,
     },
     "gpt-4o-mini": {
         "label": "GPT-4o mini",
@@ -47,6 +51,7 @@ PROVIDERS = {
         "env_key": "OPENAI_API_KEY",
         "key_url": "https://platform.openai.com/api-keys",
         "skills": ["structured_output", "speed"],
+        "supports_tools": True,
     },
 }
 
