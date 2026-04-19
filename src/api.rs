@@ -57,6 +57,8 @@ async fn run_tool(
         "write_file" => {
             let path = input["path"].as_str().unwrap_or("");
             let content = input["content"].as_str().unwrap_or("");
+            let desc = format!("write {} bytes → {}", content.len(), path);
+            if !prompt_confirm(&desc, tx, confirm_rx).await { return "denied".into(); }
             match std::fs::write(path, content) {
                 Ok(_) => {
                     tx.send(StreamEvent::Delta(format!("← _wrote {} bytes_\n\n", content.len())))
