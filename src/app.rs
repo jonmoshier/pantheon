@@ -4,6 +4,7 @@ use tui_textarea::TextArea;
 use ratatui::style::{Color, Modifier, Style};
 
 use crate::api::StreamEvent;
+use crate::theme::{Theme, THEMES};
 
 /// Which API format and endpoint a model uses.
 /// OpenAiCompat covers Groq, Together, Ollama, OpenAI — same wire format, different URL + key.
@@ -56,6 +57,8 @@ pub struct ChatMessage {
 pub enum AppMode {
     Normal,
     ModelSelect,
+    Help,
+    Confirm(String),
 }
 
 pub struct App {
@@ -64,6 +67,7 @@ pub struct App {
     pub textarea: TextArea<'static>,
     pub model_idx: usize,
     pub picker_idx: usize,
+    pub theme_idx: usize,
     pub streaming: bool,
     pub current_stream: String,
     pub stream_rx: Option<mpsc::Receiver<StreamEvent>>,
@@ -74,6 +78,8 @@ pub struct App {
     pub should_quit: bool,
     pub mode: AppMode,
     pub spinner_tick: u8,
+    pub confirm_tx: Option<mpsc::Sender<bool>>,
+    pub status_msg: Option<(String, u8)>,
 }
 
 impl App {
@@ -82,6 +88,7 @@ impl App {
             messages: vec![],
             api_history: vec![],
             textarea: make_textarea(),
+            theme_idx: 0,
             model_idx: 0,
             picker_idx: 0,
             streaming: false,
@@ -94,6 +101,8 @@ impl App {
             should_quit: false,
             mode: AppMode::Normal,
             spinner_tick: 0,
+            confirm_tx: None,
+            status_msg: None,
         };
         if app.api_key.is_none() {
             app.push_system(
@@ -107,7 +116,24 @@ impl App {
         &MODELS[self.model_idx]
     }
 
+    pub fn theme(&self) -> &'static Theme {
+        &THEMES[self.theme_idx]
+    }
+
+    pub fn cycle_theme(&mut self) {
+        self.theme_idx = (self.theme_idx + 1) % THEMES.len();
+        self.push_info(format!("theme: {}", self.theme().name));
+    }
+
     pub fn poll_stream(&mut self) {
+        if let Some((_, ref mut ticks)) = self.status_msg {
+            if *ticks == 0 {
+                self.status_msg = None;
+            } else {
+                *ticks = ticks.saturating_sub(1);
+            }
+        }
+
         let mut rx = match self.stream_rx.take() {
             Some(r) => r,
             None => return,
@@ -115,6 +141,7 @@ impl App {
 
         let mut finished = false;
         let mut error: Option<String> = None;
+        let mut confirm: Option<String> = None;
 
         loop {
             match rx.try_recv() {
@@ -124,6 +151,10 @@ impl App {
                 }
                 Ok(StreamEvent::ApiHistory(new_msgs)) => {
                     self.api_history.extend(new_msgs);
+                }
+                Ok(StreamEvent::ConfirmRequest(desc)) => {
+                    confirm = Some(desc);
+                    break;
                 }
                 Ok(StreamEvent::Done) => {
                     finished = true;
@@ -148,13 +179,18 @@ impl App {
             }
             self.streaming = false;
             self.stream_handle = None;
+            self.confirm_tx = None;
             self.auto_scroll = true;
         } else if let Some(e) = error {
             self.push_system(format!("error: {}", e));
             self.current_stream.clear();
             self.streaming = false;
             self.stream_handle = None;
+            self.confirm_tx = None;
             self.auto_scroll = true;
+        } else if let Some(desc) = confirm {
+            self.mode = AppMode::Confirm(desc);
+            self.stream_rx = Some(rx);
         } else {
             self.stream_rx = Some(rx);
         }
@@ -219,18 +255,20 @@ impl App {
         };
 
         let (tx, rx) = mpsc::channel(256);
+        let (confirm_tx, confirm_rx) = mpsc::channel(1);
         self.stream_rx = Some(rx);
+        self.confirm_tx = Some(confirm_tx);
         self.streaming = true;
 
         let model = self.model().id.to_string();
         let handle = match provider {
             Provider::Anthropic => tokio::spawn(async move {
-                crate::api::stream_anthropic(api_key, model, msgs, tx).await;
+                crate::api::stream_anthropic(api_key, model, msgs, tx, confirm_rx).await;
             }),
             Provider::OpenAiCompat { base_url, .. } => {
                 let base_url = base_url.to_string();
                 tokio::spawn(async move {
-                    crate::api::stream_openai_compat(base_url, api_key, model, msgs, tx).await;
+                    crate::api::stream_openai_compat(base_url, api_key, model, msgs, tx, confirm_rx).await;
                 })
             }
         };
@@ -243,8 +281,10 @@ impl App {
         }
         self.streaming = false;
         self.stream_rx = None;
+        self.confirm_tx = None;
+        self.mode = AppMode::Normal;
         self.current_stream.clear();
-        self.push_system("Request cancelled.".into());
+        self.push_info("Request cancelled.".into());
     }
 
     pub fn open_model_picker(&mut self) {
@@ -258,7 +298,7 @@ impl App {
 
     pub fn confirm_model_select(&mut self) {
         self.model_idx = self.picker_idx;
-        self.push_system(format!("Switched to {}.", self.model().label));
+        self.push_info(format!("Switched to {}.", self.model().label));
         self.mode = AppMode::Normal;
     }
 
@@ -284,6 +324,14 @@ impl App {
         self.scroll_offset = self.scroll_offset.saturating_add(3);
     }
 
+    pub fn open_help(&mut self) {
+        self.mode = AppMode::Help;
+    }
+
+    pub fn close_help(&mut self) {
+        self.mode = AppMode::Normal;
+    }
+
     fn handle_command(&mut self, cmd: &str) {
         let mut parts = cmd.splitn(2, ' ');
         let verb = parts.next().unwrap_or("").to_lowercase();
@@ -293,6 +341,9 @@ impl App {
             "quit" | "exit" | "q" => {
                 self.should_quit = true;
             }
+            "help" | "h" | "?" => {
+                self.open_help();
+            }
             "model" => {
                 if arg.is_empty() {
                     self.open_model_picker();
@@ -301,7 +352,7 @@ impl App {
                         || m.id.to_lowercase().contains(&arg.to_lowercase())
                 }) {
                     self.model_idx = idx;
-                    self.push_system(format!("Switched to {}.", MODELS[idx].label));
+                    self.push_info(format!("Switched to {}.", MODELS[idx].label));
                 } else {
                     self.push_system(format!(
                         "unknown model '{}' — try haiku, sonnet, or opus",
@@ -309,13 +360,41 @@ impl App {
                     ));
                 }
             }
+            "theme" => {
+                if arg.is_empty() {
+                    let list = THEMES.iter().enumerate()
+                        .map(|(i, t)| {
+                            if i == self.theme_idx {
+                                format!("  {} ←", t.name)
+                            } else {
+                                format!("  {}", t.name)
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    self.push_system(format!(
+                        "theme: {}\n\navailable:\n{}\n\nuse /theme <name> or Ctrl+T to cycle",
+                        self.theme().name, list
+                    ));
+                } else if let Some(idx) = THEMES.iter().position(|t| t.name == arg) {
+                    self.theme_idx = idx;
+                    self.push_info(format!("theme: {}", THEMES[idx].name));
+                } else {
+                    let names = THEMES.iter().map(|t| t.name).collect::<Vec<_>>().join(", ");
+                    self.push_system(format!("unknown theme '{}' — try: {}", arg, names));
+                }
+            }
             _ => {
                 self.push_system(format!(
-                    "unknown command /{} — try /model or /quit",
+                    "unknown command /{} — try /help, /model, /theme, or /quit",
                     verb
                 ));
             }
         }
+    }
+
+    pub fn push_info(&mut self, msg: String) {
+        self.status_msg = Some((msg, 60));
     }
 
     fn push_system(&mut self, content: String) {
@@ -333,7 +412,7 @@ fn make_textarea() -> TextArea<'static> {
     ta.set_cursor_line_style(Style::default());
     ta.set_style(Style::default().fg(Color::Rgb(212, 212, 212)).bg(Color::Rgb(24, 24, 24)));
     ta.set_cursor_style(Style::default().add_modifier(Modifier::REVERSED));
-    ta.set_placeholder_text("Message… (Enter to send · Alt+Enter for newline · Ctrl+P for model)");
+    ta.set_placeholder_text("Message… (Enter to send · Alt+Enter for newline · Ctrl+P for model · /help for commands)");
     ta.set_placeholder_style(Style::default().fg(Color::Rgb(85, 85, 85)));
     ta
 }
