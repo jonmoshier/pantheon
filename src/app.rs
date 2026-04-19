@@ -1,7 +1,7 @@
+use ratatui::style::{Color, Modifier, Style};
 use serde_json::{json, Value};
 use tokio::{sync::mpsc, task::JoinHandle};
 use tui_textarea::TextArea;
-use ratatui::style::{Color, Modifier, Style};
 
 use crate::api::StreamEvent;
 use crate::theme::{Theme, THEMES};
@@ -31,7 +31,11 @@ fn build_models() -> Vec<Model> {
                 },
                 _ => return None,
             };
-            Some(Model { label: d.label, id: d.id, provider })
+            Some(Model {
+                label: d.label,
+                id: d.id,
+                provider,
+            })
         })
         .collect()
 }
@@ -109,9 +113,7 @@ impl App {
             history_draft: String::new(),
         };
         if app.api_key.is_none() {
-            app.push_system(
-                "No API key found. Set ANTHROPIC_API_KEY and restart.".into(),
-            );
+            app.push_system("No API key found. Set ANTHROPIC_API_KEY and restart.".into());
         }
         app
     }
@@ -248,18 +250,21 @@ impl App {
         // since they don't share the same history format.
         let msgs: Vec<Value> = match &provider {
             Provider::Anthropic => {
-                self.api_history.push(json!({"role": "user", "content": text}));
+                self.api_history
+                    .push(json!({"role": "user", "content": text}));
                 self.api_history.clone()
             }
-            Provider::OpenAiCompat { .. } => {
-                self.messages.iter()
-                    .filter(|m| matches!(m.role, Role::User | Role::Assistant))
-                    .map(|m| json!({
+            Provider::OpenAiCompat { .. } => self
+                .messages
+                .iter()
+                .filter(|m| matches!(m.role, Role::User | Role::Assistant))
+                .map(|m| {
+                    json!({
                         "role": if matches!(m.role, Role::User) { "user" } else { "assistant" },
                         "content": m.content,
-                    }))
-                    .collect()
-            }
+                    })
+                })
+                .collect(),
         };
 
         let (tx, rx) = mpsc::channel(256);
@@ -273,11 +278,10 @@ impl App {
             Provider::Anthropic => tokio::spawn(async move {
                 crate::api::stream_anthropic(api_key, model_id, msgs, tx, confirm_rx).await;
             }),
-            Provider::OpenAiCompat { base_url, .. } => {
-                tokio::spawn(async move {
-                    crate::api::stream_openai_compat(base_url, api_key, model_id, msgs, tx, confirm_rx).await;
-                })
-            }
+            Provider::OpenAiCompat { base_url, .. } => tokio::spawn(async move {
+                crate::api::stream_openai_compat(base_url, api_key, model_id, msgs, tx, confirm_rx)
+                    .await;
+            }),
         };
         self.stream_handle = Some(handle);
     }
@@ -340,7 +344,9 @@ impl App {
     }
 
     pub fn history_prev(&mut self) {
-        if self.input_history.is_empty() { return; }
+        if self.input_history.is_empty() {
+            return;
+        }
         let idx = match self.history_idx {
             None => {
                 self.history_draft = self.textarea.lines().join("\n");
@@ -359,7 +365,9 @@ impl App {
             self.history_idx = None;
             let draft = std::mem::take(&mut self.history_draft);
             self.textarea = make_textarea();
-            if !draft.is_empty() { self.textarea.insert_str(&draft); }
+            if !draft.is_empty() {
+                self.textarea.insert_str(&draft);
+            }
         } else {
             self.history_idx = Some(idx + 1);
             self.textarea = make_textarea();
@@ -370,7 +378,11 @@ impl App {
     pub fn save_conversation(&mut self, name: &str) {
         let dir = crate::config::conversations_dir();
         let _ = std::fs::create_dir_all(&dir);
-        let filename = if name.is_empty() { timestamp_name() } else { name.to_string() };
+        let filename = if name.is_empty() {
+            timestamp_name()
+        } else {
+            name.to_string()
+        };
         let path = dir.join(format!("{}.json", filename));
         let data = serde_json::json!({
             "version": 1,
@@ -378,7 +390,10 @@ impl App {
             "messages": self.messages,
             "api_history": self.api_history,
         });
-        match std::fs::write(&path, serde_json::to_string_pretty(&data).unwrap_or_default()) {
+        match std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&data).unwrap_or_default(),
+        ) {
             Ok(_) => self.push_info(format!("Saved to {}.json", filename)),
             Err(e) => self.push_system(format!("error saving: {}", e)),
         }
@@ -393,14 +408,22 @@ impl App {
                         .filter_map(|e| e.ok())
                         .filter_map(|e| {
                             let n = e.file_name().to_string_lossy().to_string();
-                            n.ends_with(".json").then(|| n.trim_end_matches(".json").to_string())
+                            n.ends_with(".json")
+                                .then(|| n.trim_end_matches(".json").to_string())
                         })
                         .collect();
                     names.sort();
                     if names.is_empty() {
                         self.push_system("no saved conversations — use /save [name]".into());
                     } else {
-                        self.push_system(format!("saved conversations:\n{}", names.iter().map(|n| format!("  {}", n)).collect::<Vec<_>>().join("\n")));
+                        self.push_system(format!(
+                            "saved conversations:\n{}",
+                            names
+                                .iter()
+                                .map(|n| format!("  {}", n))
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        ));
                     }
                 }
                 Err(_) => self.push_system("no saved conversations — use /save [name]".into()),
@@ -410,11 +433,20 @@ impl App {
         let path = dir.join(format!("{}.json", name));
         let content = match std::fs::read_to_string(&path) {
             Ok(c) => c,
-            Err(_) => { self.push_system(format!("error: '{}' not found — use /load to list saves", name)); return; }
+            Err(_) => {
+                self.push_system(format!(
+                    "error: '{}' not found — use /load to list saves",
+                    name
+                ));
+                return;
+            }
         };
         let v: Value = match serde_json::from_str(&content) {
             Ok(v) => v,
-            Err(e) => { self.push_system(format!("error parsing save: {}", e)); return; }
+            Err(e) => {
+                self.push_system(format!("error parsing save: {}", e));
+                return;
+            }
         };
         self.messages = serde_json::from_value(v["messages"].clone()).unwrap_or_default();
         self.api_history = v["api_history"].as_array().cloned().unwrap_or_default();
@@ -446,7 +478,11 @@ impl App {
                 let mut lines = vec![
                     format!("model:    {}", self.model().label),
                     format!("cwd:      {}", cwd),
-                    format!("messages: {}  (api history: {})", self.messages.len(), self.api_history.len()),
+                    format!(
+                        "messages: {}  (api history: {})",
+                        self.messages.len(),
+                        self.api_history.len()
+                    ),
                 ];
 
                 lines.push(String::new());
@@ -493,7 +529,9 @@ impl App {
             }
             "theme" => {
                 if arg.is_empty() {
-                    let list = THEMES.iter().enumerate()
+                    let list = THEMES
+                        .iter()
+                        .enumerate()
                         .map(|(i, t)| {
                             if i == self.theme_idx {
                                 format!("  {} ←", t.name)
@@ -505,7 +543,8 @@ impl App {
                         .join("\n");
                     self.push_system(format!(
                         "theme: {}\n\navailable:\n{}\n\nuse /theme <name> or Ctrl+T to cycle",
-                        self.theme().name, list
+                        self.theme().name,
+                        list
                     ));
                 } else if let Some(idx) = THEMES.iter().position(|t| t.name == arg) {
                     self.theme_idx = idx;
@@ -538,10 +577,119 @@ impl App {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_app() -> App {
+        App::new(Some("test-key".into()))
+    }
+
+    #[test]
+    fn clear_command_empties_messages() {
+        let mut app = make_app();
+        app.messages.push(ChatMessage {
+            role: Role::User,
+            content: "hi".into(),
+            model_label: None,
+        });
+        app.handle_command("clear");
+        assert!(app.messages.is_empty());
+    }
+
+    #[test]
+    fn clear_sets_status_msg() {
+        let mut app = make_app();
+        app.handle_command("clear");
+        assert!(app.status_msg.is_some());
+        let (msg, _) = app.status_msg.as_ref().unwrap();
+        assert!(msg.contains("cleared"));
+    }
+
+    #[test]
+    fn unknown_command_adds_system_message() {
+        let mut app = make_app();
+        app.handle_command("nope");
+        let last = app.messages.last().unwrap();
+        assert!(matches!(last.role, Role::System));
+        assert!(last.content.contains("unknown command"));
+    }
+
+    #[test]
+    fn model_command_with_arg_switches_model() {
+        let mut app = make_app();
+        let initial_idx = app.model_idx;
+        if app.models.len() > 1 {
+            let other_label = app.models[(initial_idx + 1) % app.models.len()]
+                .label
+                .clone();
+            app.handle_command(&format!("model {}", other_label));
+            assert_ne!(app.model_idx, initial_idx);
+        }
+    }
+
+    #[test]
+    fn model_command_unknown_shows_error() {
+        let mut app = make_app();
+        app.handle_command("model zzz_nonexistent_model_zzz");
+        let last = app.messages.last().unwrap();
+        assert!(matches!(last.role, Role::System));
+        assert!(last.content.contains("unknown model"));
+    }
+
+    #[test]
+    fn theme_command_with_arg_switches_theme() {
+        let mut app = make_app();
+        let new_name = if app.theme_idx == 0 {
+            THEMES[1].name
+        } else {
+            THEMES[0].name
+        };
+        app.handle_command(&format!("theme {}", new_name));
+        assert_eq!(app.theme().name, new_name);
+    }
+
+    #[test]
+    fn cycle_theme_wraps_around() {
+        let mut app = make_app();
+        let total = THEMES.len();
+        for _ in 0..total {
+            app.cycle_theme();
+        }
+        assert_eq!(app.theme_idx, 0);
+    }
+
+    #[test]
+    fn push_info_sets_status_msg_with_ticks() {
+        let mut app = make_app();
+        app.push_info("hello".into());
+        let (msg, ticks) = app.status_msg.as_ref().unwrap();
+        assert_eq!(msg, "hello");
+        assert!(*ticks > 0);
+    }
+
+    #[test]
+    fn help_command_opens_help_mode() {
+        let mut app = make_app();
+        app.handle_command("help");
+        assert!(matches!(app.mode, AppMode::Help));
+    }
+
+    #[test]
+    fn quit_command_sets_should_quit() {
+        let mut app = make_app();
+        app.handle_command("quit");
+        assert!(app.should_quit);
+    }
+}
+
 fn load_input_history() -> Vec<String> {
     let path = crate::config::history_file();
-    let Ok(content) = std::fs::read_to_string(path) else { return vec![] };
-    content.lines()
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return vec![];
+    };
+    content
+        .lines()
         .filter(|l| l.starts_with('+'))
         .map(|l| l[1..].to_string())
         .filter(|l| !l.is_empty())
@@ -552,7 +700,11 @@ fn append_input_history(entry: &str) {
     use std::io::Write as _;
     let path = crate::config::history_file();
     let _ = std::fs::create_dir_all(path.parent().unwrap());
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         let secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -572,9 +724,15 @@ fn timestamp_name() -> String {
 fn make_textarea() -> TextArea<'static> {
     let mut ta = TextArea::default();
     ta.set_cursor_line_style(Style::default());
-    ta.set_style(Style::default().fg(Color::Rgb(212, 212, 212)).bg(Color::Rgb(24, 24, 24)));
+    ta.set_style(
+        Style::default()
+            .fg(Color::Rgb(212, 212, 212))
+            .bg(Color::Rgb(24, 24, 24)),
+    );
     ta.set_cursor_style(Style::default().add_modifier(Modifier::REVERSED));
-    ta.set_placeholder_text("Message… (Enter to send · Alt+Enter for newline · Ctrl+P for model · /help for commands)");
+    ta.set_placeholder_text(
+        "Message… (Enter to send · Alt+Enter for newline · Ctrl+P for model · /help for commands)",
+    );
     ta.set_placeholder_style(Style::default().fg(Color::Rgb(85, 85, 85)));
     ta
 }

@@ -1,9 +1,9 @@
 use ratatui::{
-    Frame,
     layout::{Constraint, Direction, Layout, Margin, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Wrap},
+    Frame,
 };
 
 use crate::app::{App, AppMode, Role};
@@ -16,7 +16,10 @@ pub fn render(f: &mut Frame, app: &mut App) {
 
     f.render_widget(Block::default().style(Style::default().bg(theme.bg)), area);
 
-    let content = area.inner(Margin { horizontal: 3, vertical: 0 });
+    let content = area.inner(Margin {
+        horizontal: 3,
+        vertical: 0,
+    });
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -46,7 +49,9 @@ fn render_messages(f: &mut Frame, app: &mut App, area: Rect) {
 
     lines.push(Line::from(Span::styled(
         "Pantheon",
-        Style::default().fg(theme.title).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(theme.title)
+            .add_modifier(Modifier::BOLD),
     )));
     lines.push(Line::from(Span::styled(
         "Ctrl+P model  ·  Ctrl+T theme  ·  Ctrl+X cancel  ·  Alt+Enter newline  ·  /help for commands",
@@ -71,7 +76,9 @@ fn render_messages(f: &mut Frame, app: &mut App, area: Rect) {
             Role::User => {
                 lines.push(Line::from(Span::styled(
                     "you",
-                    Style::default().fg(theme.user_accent).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme.user_accent)
+                        .add_modifier(Modifier::BOLD),
                 )));
                 for text_line in msg.content.lines() {
                     lines.push(Line::from(Span::styled(
@@ -101,7 +108,10 @@ fn render_messages(f: &mut Frame, app: &mut App, area: Rect) {
                 }
             }
         }
-        lines.push(Line::from(Span::styled(sep.clone(), Style::default().fg(theme.sep))));
+        lines.push(Line::from(Span::styled(
+            sep.clone(),
+            Style::default().fg(theme.sep),
+        )));
         lines.push(Line::default());
     }
 
@@ -142,12 +152,18 @@ fn render_status(f: &mut Frame, app: &App, area: Rect) {
     let theme = app.theme();
 
     let (left, fg) = if let AppMode::Confirm(ref desc) = app.mode {
-        (format!("▶ {}   [ Y ] approve   [ N ] deny", desc), theme.user_accent)
+        (
+            format!("▶ {}   [ Y ] approve   [ N ] deny", desc),
+            theme.user_accent,
+        )
     } else if let Some((ref msg, _)) = app.status_msg {
         (msg.clone(), theme.dim)
     } else if app.streaming {
         let spinner = SPINNER[app.spinner_tick as usize % SPINNER.len()];
-        (format!("{} {}  streaming", app.model().label, spinner), theme.status_fg)
+        (
+            format!("{} {}  streaming", app.model().label, spinner),
+            theme.status_fg,
+        )
     } else {
         (app.model().label.to_string(), theme.status_fg)
     };
@@ -179,7 +195,11 @@ fn render_input(f: &mut Frame, app: &mut App, area: Rect) {
     let theme = app.theme();
     let box_area = Rect::new(area.x, area.y, area.width, area.height.saturating_sub(1));
 
-    let border_color = if app.streaming { theme.border } else { theme.border_active };
+    let border_color = if app.streaming {
+        theme.border
+    } else {
+        theme.border_active
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -198,12 +218,18 @@ fn render_model_picker(f: &mut Frame, app: &App) {
 
     f.render_widget(Clear, area);
 
-    let items: Vec<ListItem> = app.models
+    let items: Vec<ListItem> = app
+        .models
         .iter()
         .enumerate()
         .map(|(i, m)| {
             let (prefix, style) = if i == app.picker_idx {
-                ("  ▸ ", Style::default().fg(theme.user_accent).add_modifier(Modifier::BOLD))
+                (
+                    "  ▸ ",
+                    Style::default()
+                        .fg(theme.user_accent)
+                        .add_modifier(Modifier::BOLD),
+                )
             } else {
                 ("    ", Style::default().fg(theme.text))
             };
@@ -224,6 +250,7 @@ fn render_model_picker(f: &mut Frame, app: &App) {
     f.render_widget(list, area);
 }
 
+#[allow(clippy::vec_init_then_push)]
 fn render_help_dialog(f: &mut Frame, app: &App) {
     let theme = app.theme();
     let popup_width = 70u16;
@@ -237,7 +264,9 @@ fn render_help_dialog(f: &mut Frame, app: &App) {
     // Title
     lines.push(Line::from(Span::styled(
         "SLASH COMMANDS",
-        Style::default().fg(theme.user_accent).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(theme.user_accent)
+            .add_modifier(Modifier::BOLD),
     )));
     lines.push(Line::from(Span::styled(
         "  /help              Show this help dialog",
@@ -276,7 +305,9 @@ fn render_help_dialog(f: &mut Frame, app: &App) {
 
     lines.push(Line::from(Span::styled(
         "KEYBINDINGS",
-        Style::default().fg(theme.user_accent).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(theme.user_accent)
+            .add_modifier(Modifier::BOLD),
     )));
     lines.push(Line::from(Span::styled(
         "  Enter              Send message",
@@ -335,10 +366,17 @@ fn wrapped_line_count(lines: &[Line<'static>], width: u16) -> u16 {
     if width == 0 {
         return lines.len() as u16;
     }
-    lines.iter().map(|line| {
-        let chars: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
-        if chars == 0 { 1 } else { ((chars as u16 - 1) / width) + 1 }
-    }).sum()
+    lines
+        .iter()
+        .map(|line| {
+            let chars: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
+            if chars == 0 {
+                1
+            } else {
+                ((chars as u16 - 1) / width) + 1
+            }
+        })
+        .sum()
 }
 
 fn indent_line(line: Line<'static>) -> Line<'static> {
