@@ -2,8 +2,14 @@
 /target/
 
 # Credentials — never commit these
-.pantheon/
+.pantheon/credentials.json
+.pantheon/keys/
 credentials.json
+
+# Track project config in .pantheon, but not credentials
+!.pantheon/system_prompt.md
+!.pantheon/system_prompt.example.md
+!.pantheon/context.md
 
 # Env
 .env

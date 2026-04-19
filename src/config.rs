@@ -43,6 +43,13 @@ id = "llama-3.1-8b-instant"
 provider = "openai-compat"
 base_url = "https://api.groq.com/openai/v1"
 env_key = "GROQ_API_KEY"
+
+[[models]]
+label = "OR Auto"
+id = "openrouter/auto"
+provider = "openai-compat"
+base_url = "https://openrouter.ai/api/v1"
+env_key = "OPENROUTER_API_KEY"
 "#;
 
 #[derive(serde::Deserialize)]
@@ -92,6 +99,21 @@ pub fn conversations_dir() -> PathBuf {
 
 pub fn history_file() -> PathBuf {
     pantheon_dir().join("history")
+}
+
+pub fn load_last_model() -> Option<String> {
+    let path = pantheon_dir().join("settings.toml");
+    let contents = std::fs::read_to_string(path).ok()?;
+    let table: toml::Table = toml::from_str(&contents).ok()?;
+    table.get("last_model")?.as_str().map(|s| s.to_string())
+}
+
+pub fn save_last_model(model_id: &str) {
+    let dir = pantheon_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("settings.toml");
+    let contents = format!("last_model = \"{}\"\n", model_id);
+    let _ = std::fs::write(path, contents);
 }
 
 pub fn load_api_key(env_key: &str) -> Option<String> {

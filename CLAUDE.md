@@ -41,7 +41,7 @@ classify(prompt) → (tier, skill)       ← static rules today, routing-skill L
 pick_model(tier, skill) → provider     ← scores by skill match + tier
     │
     ▼
-litellm.completion(model, messages)
+provider_client.complete(model, messages)
 ```
 
 ## Provider philosophy

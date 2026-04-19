@@ -8,6 +8,7 @@ pub enum StreamEvent {
     Delta(String),
     ApiHistory(Vec<Value>),
     ConfirmRequest(String),
+    ModelResolved(String),
     Done,
     Error(String),
 }
@@ -642,19 +643,47 @@ fn openai_tool_defs() -> Vec<Value> {
 
 // ── System prompt ─────────────────────────────────────────────────────────────
 
-fn system_prompt() -> String {
+fn system_prompt(custom_path: Option<&str>) -> String {
     let cwd = std::env::current_dir()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| ".".to_string());
+    let home = std::env::var("HOME").unwrap_or_default();
 
-    let mut prompt = format!(
+    let default = format!(
         "You are a helpful assistant running in a terminal.\n\
          File and directory tools are sandboxed to the current working directory: {cwd}\n\
          Do not attempt to access paths outside {cwd}. If a task requires files outside this \
          directory, ask the user to change directory or grant access rather than trying anyway."
     );
 
-    // Auto-load project context files if present
+    // Load global user prompt: -s override or ~/.pantheon/system_prompt.md
+    let global_path = custom_path
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::Path::new(&home).join(".pantheon/system_prompt.md"));
+    let global = std::fs::read_to_string(&global_path)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    // Load project prompt: ./.pantheon/system_prompt.md
+    let project_path = std::path::Path::new(&cwd).join(".pantheon/system_prompt.md");
+    let project = std::fs::read_to_string(&project_path)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    // Build prompt: project (most specific) → global → default
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(p) = project {
+        parts.push(p);
+    }
+    if let Some(g) = global {
+        parts.push(g);
+    }
+    parts.push(default);
+    let mut prompt = parts.join("\n\n");
+
+    // Append project context files
     let cwd_path = std::path::Path::new(&cwd);
     for name in &["CLAUDE.md", "README.md", ".pantheon/context.md"] {
         let path = cwd_path.join(name);
@@ -675,8 +704,18 @@ pub async fn stream_anthropic(
     messages: Vec<Value>,
     tx: mpsc::Sender<StreamEvent>,
     mut confirm_rx: mpsc::Receiver<bool>,
+    system_prompt_path: Option<String>,
 ) {
-    if let Err(e) = anthropic_loop(api_key, model, messages, &tx, &mut confirm_rx).await {
+    if let Err(e) = anthropic_loop(
+        api_key,
+        model,
+        messages,
+        &tx,
+        &mut confirm_rx,
+        system_prompt_path.as_deref(),
+    )
+    .await
+    {
         tx.send(StreamEvent::Error(e.to_string())).await.ok();
     }
 }
@@ -687,13 +726,25 @@ async fn anthropic_loop(
     initial_messages: Vec<Value>,
     tx: &mpsc::Sender<StreamEvent>,
     confirm_rx: &mut mpsc::Receiver<bool>,
+    system_prompt_path: Option<&str>,
 ) -> anyhow::Result<()> {
     let client = Client::new();
     let mut all_messages = initial_messages;
     let mut new_msgs: Vec<Value> = Vec::new();
-    let system = system_prompt();
+    let system = system_prompt(system_prompt_path);
+    let mut iterations = 0;
 
     loop {
+        iterations += 1;
+        if iterations > 10 {
+            tx.send(StreamEvent::Error(
+                "tool call loop exceeded 10 iterations — aborting".to_string(),
+            ))
+            .await
+            .ok();
+            break;
+        }
+
         let resp = client
             .post("https://api.anthropic.com/v1/messages")
             .header("x-api-key", &api_key)
@@ -722,7 +773,15 @@ async fn anthropic_loop(
         let (text, calls) = collect_anthropic_stream(resp, tx).await?;
 
         if calls.is_empty() {
-            new_msgs.push(json!({"role": "assistant", "content": text}));
+            if text.is_empty() {
+                tx.send(StreamEvent::Error(
+                    "model returned empty response".to_string(),
+                ))
+                .await
+                .ok();
+            } else {
+                new_msgs.push(json!({"role": "assistant", "content": text}));
+            }
             break;
         }
 
@@ -847,8 +906,19 @@ pub async fn stream_openai_compat(
     messages: Vec<Value>,
     tx: mpsc::Sender<StreamEvent>,
     mut confirm_rx: mpsc::Receiver<bool>,
+    system_prompt_path: Option<String>,
 ) {
-    if let Err(e) = openai_loop(base_url, api_key, model, messages, &tx, &mut confirm_rx).await {
+    if let Err(e) = openai_loop(
+        base_url,
+        api_key,
+        model,
+        messages,
+        &tx,
+        &mut confirm_rx,
+        system_prompt_path.as_deref(),
+    )
+    .await
+    {
         tx.send(StreamEvent::Error(e.to_string())).await.ok();
     }
 }
@@ -860,13 +930,26 @@ async fn openai_loop(
     initial_messages: Vec<Value>,
     tx: &mpsc::Sender<StreamEvent>,
     confirm_rx: &mut mpsc::Receiver<bool>,
+    system_prompt_path: Option<&str>,
 ) -> anyhow::Result<()> {
     let client = Client::new();
-    let mut all_messages = vec![json!({"role": "system", "content": system_prompt()})];
+    let mut all_messages =
+        vec![json!({"role": "system", "content": system_prompt(system_prompt_path)})];
     all_messages.extend(initial_messages);
     let mut new_msgs: Vec<Value> = Vec::new();
+    let mut iterations = 0;
 
     loop {
+        iterations += 1;
+        if iterations > 10 {
+            tx.send(StreamEvent::Error(
+                "tool call loop exceeded 10 iterations — aborting".to_string(),
+            ))
+            .await
+            .ok();
+            break;
+        }
+
         let resp = client
             .post(format!("{}/chat/completions", base_url))
             .header("Authorization", format!("Bearer {}", api_key))
@@ -892,7 +975,15 @@ async fn openai_loop(
         let (text, calls) = collect_openai_stream(resp, tx).await?;
 
         if calls.is_empty() {
-            new_msgs.push(json!({"role": "assistant", "content": text}));
+            if text.is_empty() {
+                tx.send(StreamEvent::Error(
+                    "model returned empty response".to_string(),
+                ))
+                .await
+                .ok();
+            } else {
+                new_msgs.push(json!({"role": "assistant", "content": text}));
+            }
             break;
         }
 
@@ -916,7 +1007,18 @@ async fn openai_loop(
         new_msgs.push(assistant_msg);
 
         for tc in &calls {
-            let args: Value = serde_json::from_str(&tc.arguments).unwrap_or(Value::Null);
+            let args: Value = match serde_json::from_str(&tc.arguments) {
+                Ok(v) => v,
+                Err(e) => {
+                    tx.send(StreamEvent::Error(format!(
+                        "failed to parse tool arguments for '{}': {} — raw: {}",
+                        tc.name, e, tc.arguments
+                    )))
+                    .await
+                    .ok();
+                    break;
+                }
+            };
             let output = run_tool(&tc.name, &args, tx, confirm_rx).await;
             let tool_msg = json!({
                 "role": "tool",
@@ -941,6 +1043,7 @@ async fn collect_openai_stream(
     let mut buf = String::new();
     let mut text = String::new();
     let mut calls: Vec<OpenAiToolCall> = Vec::new();
+    let mut model_resolved = false;
 
     'outer: while let Some(chunk) = stream.next().await {
         buf.push_str(&String::from_utf8_lossy(&chunk?));
@@ -959,8 +1062,25 @@ async fn collect_openai_stream(
 
             let v: Value = match serde_json::from_str(data) {
                 Ok(v) => v,
-                Err(_) => continue,
+                Err(e) => {
+                    tx.send(StreamEvent::Error(format!(
+                        "stream parse error: {}: {}",
+                        e, data
+                    )))
+                    .await
+                    .ok();
+                    continue;
+                }
             };
+
+            if !model_resolved {
+                if let Some(model_id) = v["model"].as_str() {
+                    tx.send(StreamEvent::ModelResolved(model_id.to_string()))
+                        .await
+                        .ok();
+                    model_resolved = true;
+                }
+            }
 
             let choice = &v["choices"][0];
 

@@ -117,7 +117,11 @@ fn render_messages(f: &mut Frame, app: &mut App, area: Rect) {
 
     if app.streaming {
         let spinner = SPINNER[app.spinner_tick as usize % SPINNER.len()];
-        let label = app.model().label.as_str();
+        let base = app.model().label.to_string();
+        let label = match &app.resolved_model {
+            Some(id) if id != &app.model().id => format!("{} ({})", base, id),
+            _ => base,
+        };
         lines.push(Line::from(Span::styled(
             format!("{} {}", label, spinner),
             Style::default().fg(theme.dim).add_modifier(Modifier::BOLD),
@@ -160,10 +164,12 @@ fn render_status(f: &mut Frame, app: &App, area: Rect) {
         (msg.clone(), theme.dim)
     } else if app.streaming {
         let spinner = SPINNER[app.spinner_tick as usize % SPINNER.len()];
-        (
-            format!("{} {}  streaming", app.model().label, spinner),
-            theme.status_fg,
-        )
+        let base = app.model().label.to_string();
+        let label = match &app.resolved_model {
+            Some(id) if id != &app.model().id => format!("{} ({})", base, id),
+            _ => base,
+        };
+        (format!("{} {}  streaming", label, spinner), theme.status_fg)
     } else {
         (app.model().label.to_string(), theme.status_fg)
     };
@@ -364,19 +370,24 @@ fn render_help_dialog(f: &mut Frame, app: &App) {
 
 fn wrapped_line_count(lines: &[Line<'static>], width: u16) -> u16 {
     if width == 0 {
-        return lines.len() as u16;
+        return lines.len().min(u16::MAX as usize) as u16;
     }
-    lines
+    let total: u32 = lines
         .iter()
         .map(|line| {
-            let chars: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
+            let chars: u32 = line
+                .spans
+                .iter()
+                .map(|s| s.content.chars().count() as u32)
+                .sum();
             if chars == 0 {
                 1
             } else {
-                ((chars as u16 - 1) / width) + 1
+                ((chars - 1) / width as u32) + 1
             }
         })
-        .sum()
+        .sum();
+    total.min(u16::MAX as u32) as u16
 }
 
 fn indent_line(line: Line<'static>) -> Line<'static> {
