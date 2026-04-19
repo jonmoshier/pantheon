@@ -51,8 +51,10 @@ fn sandbox_path(path: &str) -> Result<String, String> {
         Ok(resolved.to_string_lossy().to_string())
     } else {
         Err(format!(
-            "error: path '{}' is outside the working directory — access denied",
-            path
+            "error: path '{}' is outside the working directory ({}). Only paths within {} are accessible. Ask the user if you need access elsewhere.",
+            path,
+            cwd.display(),
+            cwd.display(),
         ))
     }
 }
@@ -125,7 +127,7 @@ async fn run_tool(
             let path = input["path"].as_str().unwrap_or("");
             let path = match sandbox_path(path) { Ok(p) => p, Err(e) => return e };
             let desc = format!("read file: {}", path);
-            if !prompt_confirm(&desc, tx, confirm_rx).await { return "denied".into(); }
+            if !prompt_confirm(&desc, tx, confirm_rx).await { return "Action denied by user. Ask what they would like you to do instead, or try a different approach.".into(); }
             match std::fs::read_to_string(&path) {
                 Ok(content) => {
                     tx.send(StreamEvent::Delta(format!("← _read {} bytes_\n\n", content.len())))
@@ -144,7 +146,7 @@ async fn run_tool(
             let path = match sandbox_path(path) { Ok(p) => p, Err(e) => return e };
             let content = input["content"].as_str().unwrap_or("");
             let desc = format!("write {} bytes → {}", content.len(), path);
-            if !prompt_confirm(&desc, tx, confirm_rx).await { return "denied".into(); }
+            if !prompt_confirm(&desc, tx, confirm_rx).await { return "Action denied by user. Ask what they would like you to do instead, or try a different approach.".into(); }
             match std::fs::write(&path, content) {
                 Ok(_) => {
                     tx.send(StreamEvent::Delta(format!("← _wrote {} bytes_\n\n", content.len())))
@@ -163,7 +165,7 @@ async fn run_tool(
             let path = match sandbox_path(path) { Ok(p) => p, Err(e) => return e };
             let content = input["content"].as_str().unwrap_or("");
             let desc = format!("append {} bytes → {}", content.len(), path);
-            if !prompt_confirm(&desc, tx, confirm_rx).await { return "denied".into(); }
+            if !prompt_confirm(&desc, tx, confirm_rx).await { return "Action denied by user. Ask what they would like you to do instead, or try a different approach.".into(); }
             use std::io::Write as _;
             match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
                 Ok(mut file) => match file.write_all(content.as_bytes()) {
@@ -181,7 +183,7 @@ async fn run_tool(
             let path = input["path"].as_str().unwrap_or(".");
             let path = match sandbox_path(path) { Ok(p) => p, Err(e) => return e };
             let desc = format!("list dir: {}", path);
-            if !prompt_confirm(&desc, tx, confirm_rx).await { return "denied".into(); }
+            if !prompt_confirm(&desc, tx, confirm_rx).await { return "Action denied by user. Ask what they would like you to do instead, or try a different approach.".into(); }
             match std::fs::read_dir(&path) {
                 Ok(entries) => {
                     let mut names: Vec<String> = entries
@@ -208,7 +210,7 @@ async fn run_tool(
             let path = match sandbox_path(path) { Ok(p) => p, Err(e) => return e };
             let pattern = input["pattern"].as_str().unwrap_or("");
             let desc = format!("search '{}' in {}", pattern, path);
-            if !prompt_confirm(&desc, tx, confirm_rx).await { return "denied".into(); }
+            if !prompt_confirm(&desc, tx, confirm_rx).await { return "Action denied by user. Ask what they would like you to do instead, or try a different approach.".into(); }
             let cmd = format!(
                 "grep -rn --include='*' '{}' '{}' 2>/dev/null | head -200",
                 pattern.replace('\'', "'\\''"),
@@ -227,7 +229,7 @@ async fn run_tool(
         "run_shell" => {
             let command = input["command"].as_str().unwrap_or("");
             let desc = format!("$ {}", command);
-            if !prompt_confirm(&desc, tx, confirm_rx).await { return "denied".into(); }
+            if !prompt_confirm(&desc, tx, confirm_rx).await { return "Action denied by user. Ask what they would like you to do instead, or try a different approach.".into(); }
             match tokio::process::Command::new("sh").arg("-c").arg(command).output().await {
                 Ok(out) => {
                     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -249,7 +251,7 @@ async fn run_tool(
             let url = input["url"].as_str().unwrap_or("");
             if let Err(e) = check_ssrf(url).await { return e; }
             let desc = format!("fetch {}", url);
-            if !prompt_confirm(&desc, tx, confirm_rx).await { return "denied".into(); }
+            if !prompt_confirm(&desc, tx, confirm_rx).await { return "Action denied by user. Ask what they would like you to do instead, or try a different approach.".into(); }
             let client = Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
@@ -274,7 +276,7 @@ async fn run_tool(
             let task = input["task"].as_str().unwrap_or("");
             let directory = input["directory"].as_str();
             let desc = format!("delegate to Claude Code: {}", task);
-            if !prompt_confirm(&desc, tx, confirm_rx).await { return "denied".into(); }
+            if !prompt_confirm(&desc, tx, confirm_rx).await { return "Action denied by user. Ask what they would like you to do instead, or try a different approach.".into(); }
 
             let mut cmd = tokio::process::Command::new("claude");
             cmd.arg("--output-format").arg("stream-json")
@@ -487,6 +489,20 @@ fn openai_tool_defs() -> Vec<Value> {
     ]
 }
 
+// ── System prompt ─────────────────────────────────────────────────────────────
+
+fn system_prompt() -> String {
+    let cwd = std::env::current_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| ".".to_string());
+    format!(
+        "You are a helpful assistant running in a terminal.\n\
+         File and directory tools are sandboxed to the current working directory: {cwd}\n\
+         Do not attempt to access paths outside {cwd}. If a task requires files outside this \
+         directory, ask the user to change directory or grant access rather than trying anyway."
+    )
+}
+
 // ── Anthropic streaming ───────────────────────────────────────────────────────
 
 pub async fn stream_anthropic(
@@ -511,6 +527,7 @@ async fn anthropic_loop(
     let client = Client::new();
     let mut all_messages = initial_messages;
     let mut new_msgs: Vec<Value> = Vec::new();
+    let system = system_prompt();
 
     loop {
         let resp = client
@@ -521,6 +538,7 @@ async fn anthropic_loop(
             .json(&json!({
                 "model": model,
                 "max_tokens": 8096,
+                "system": system,
                 "messages": all_messages,
                 "tools": anthropic_tool_defs(),
                 "stream": true,
@@ -672,7 +690,8 @@ async fn openai_loop(
     confirm_rx: &mut mpsc::Receiver<bool>,
 ) -> anyhow::Result<()> {
     let client = Client::new();
-    let mut all_messages = initial_messages;
+    let mut all_messages = vec![json!({"role": "system", "content": system_prompt()})];
+    all_messages.extend(initial_messages);
     let mut new_msgs: Vec<Value> = Vec::new();
 
     loop {
