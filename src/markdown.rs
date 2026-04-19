@@ -103,7 +103,7 @@ pub fn to_lines(content: &str, theme: &Theme) -> Vec<Line<'static>> {
 
 fn flush(spans: &mut Vec<Span<'static>>, lines: &mut Vec<Line<'static>>) {
     if !spans.is_empty() {
-        lines.push(Line::from(spans.drain(..).collect::<Vec<_>>()));
+        lines.push(Line::from(std::mem::take(spans)));
     }
 }
 

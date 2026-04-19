@@ -224,6 +224,7 @@ fn render_model_picker(f: &mut Frame, app: &App) {
     f.render_widget(list, area);
 }
 
+#[allow(clippy::vec_init_then_push)]
 fn render_help_dialog(f: &mut Frame, app: &App) {
     let theme = app.theme();
     let popup_width = 70u16;
