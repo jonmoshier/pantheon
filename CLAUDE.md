@@ -1,33 +1,12 @@
 # Pantheon
 
-Cost-aware, skill-aware LLM router for the terminal. One interface to many models — each request goes to the right one.
+A lightweight multi-model terminal chat with tool use, streaming, and a TUI you fully control. One interface to many models.
 
-## Vision
+## What it is
 
-Most people pick one LLM and use it for everything. That's expensive for simple tasks and underpowered for hard ones. Pantheon routes each message to the cheapest model that has the right skill for the job.
+Most LLM CLIs lock you to one provider. Pantheon lets you switch between Gemini, Groq, Claude, OpenRouter, or any OpenAI-compatible endpoint mid-conversation, with a clean TUI, file tools, and streaming — all in one place.
 
-The long-term goal is a multi-LLM conversation where models delegate to each other — a fast cheap model handles summarization, a reasoning model handles architecture questions, and a router model decides who gets what. Today, routing is static rules. Tomorrow, routing is itself a skill assigned to a provider.
-
-## Core concepts
-
-### Tiers
-Cost levels: `free` → `cheap` → `full`. Prefer the lowest tier that satisfies the skill requirement.
-
-### Skills
-Each provider has a list of skills it's good at. The classifier detects the task type and maps it to a skill. `pick_model` finds the best provider for that skill at the lowest tier.
-
-| Skill | Description |
-|---|---|
-| `routing` | Classifying and delegating requests to other models |
-| `code` | Writing, debugging, refactoring code |
-| `reasoning` | Multi-step logic, analysis, architecture |
-| `summarization` | Condensing and rephrasing text |
-| `speed` | Fast responses to simple factual questions |
-| `structured_output` | JSON extraction, data formatting |
-| `creative` | Writing, brainstorming, open-ended generation |
-
-### Routing skill
-`routing` is reserved for when we replace static rules with a live LLM classifier. The static classifier fills this role today. When activated, pantheon will pick the provider with the `routing` skill to classify each incoming message before dispatching it.
+The model selection is manual. For automatic routing, use OpenRouter Auto (`openrouter/auto`) — it picks the best model per request and Pantheon will display which model it routed to.
 
 ## Architecture
 
@@ -35,19 +14,56 @@ Each provider has a list of skills it's good at. The classifier detects the task
 user message
     │
     ▼
-classify(prompt) → (tier, skill)       ← static rules today, routing-skill LLM later
+App (app.rs)          ← state, input, message history
     │
     ▼
-pick_model(tier, skill) → provider     ← scores by skill match + tier
+stream_anthropic()    ← Anthropic native API
+stream_openai_compat() ← OpenAI-compatible API (Gemini, Groq, OpenRouter, etc.)
     │
     ▼
-provider_client.complete(model, messages)
+StreamEvent channel   ← tokens, tool calls, errors, model resolution
+    │
+    ▼
+TUI (ui.rs)           ← ratatui rendering, status bar, markdown
 ```
 
-## Provider philosophy
-A provider can have multiple skills. Skill match takes priority; tier is the tiebreaker. A lower-tier provider that matches the skill beats a higher-tier provider that doesn't.
+## Providers
+
+Configured in `~/.pantheon/models.toml` (written on first run). Any OpenAI-compatible endpoint works — Ollama, Together AI, local models, etc.
+
+| Provider | Notes |
+|---|---|
+| Anthropic | Native API with tool use |
+| Google Gemini | Via OpenAI-compat endpoint |
+| Groq | Fast inference |
+| OpenRouter | Access to many models; `openrouter/auto` for automatic routing |
+
+## Tool use
+
+Models can read, write, and append files (sandboxed to cwd), run shell commands, search files, and make HTTP requests. All destructive actions require user confirmation.
+
+## Key files
+
+| File | Purpose |
+|---|---|
+| `src/main.rs` | Entry point, event loop, CLI args (`-s` for system prompt) |
+| `src/app.rs` | App struct, state management, command handling |
+| `src/api.rs` | Streaming for Anthropic and OpenAI-compat, tool execution |
+| `src/ui.rs` | ratatui rendering, status bar, message display |
+| `src/config.rs` | Model definitions, settings persistence |
+| `src/markdown.rs` | Markdown → terminal rendering |
+| `src/theme.rs` | Color themes |
+
+## System prompts
+
+Pantheon loads system prompts in order (project on top, hardcoded default at the bottom):
+
+1. `./.pantheon/system_prompt.md` — project-specific context
+2. `~/.pantheon/system_prompt.md` — global user context (or `-s <path>` override)
+3. Hardcoded default — tool sandboxing instructions
 
 ## What this is not
-- Not a load balancer (no redundancy/failover goals)
-- Not an agent framework (delegation is a future milestone, not the current shape)
-- Not a proxy (local CLI tool only)
+
+- Not an automatic router (use OR Auto for that)
+- Not a load balancer or agent framework
+- Not a proxy — local CLI tool only
