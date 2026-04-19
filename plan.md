@@ -8,6 +8,8 @@ The README and CLAUDE.md describe a classifier that picks the right model per me
 **2. `read_file` has no confirmation prompt** ✅ DONE
 ~~In `api.rs`, `write_file` and `append_file` go through `prompt_confirm()`, but `read_file` silently reads any file without asking the user. A malicious or confused prompt could exfiltrate `~/.ssh/id_rsa`, `credentials.json`, or any other sensitive file. This is a security hole that should be fixed immediately — at minimum add a confirm for files outside the current working directory.~~
 
+Fixed in `src/api.rs` lines 40-51: `read_file` now calls `prompt_confirm()` before reading any file, matching the security pattern of `write_file` and `append_file`.
+
 **3. History is split-brained between providers**
 `api_history` (the Anthropic-format history) is maintained across turns, but when switching to an OpenAI-compat provider, the history is rebuilt from scratch from display messages. If you switch providers mid-conversation, the context is silently truncated. There's no warning to the user.
 
@@ -27,8 +29,10 @@ The project's whole pitch is cost-awareness, but there's no token counting, no c
 **7. `search_files` shells out to `grep` instead of using Rust**
 This means it fails silently on Windows and creates a shell injection risk if pattern or path contain shell metacharacters (the current `replace('\'', "'\\''")` escaping is not sufficient). Use the `grep` or `walkdir` + `regex` crates instead.
 
-**8. No `/help` command**
-The only discoverable commands are `/model`, `/theme`, and `/quit`. New users have no way to know this without reading the source. A `/help` command (or displaying this on startup) would drastically improve onboarding.
+**8. No `/help` command** ✅ DONE
+~~The only discoverable commands are `/model`, `/theme`, and `/quit`. New users have no way to know this without reading the source. A `/help` command (or displaying this on startup) would drastically improve onboarding.~~
+
+Implemented in `src/ui.rs` lines 211-245: Full `/help` command with a comprehensive help dialog showing slash commands and keybindings. Triggeraable via `/help`, `/h`, or `/?`. Help is also discoverable through UI hints and input placeholder text.
 
 ---
 
