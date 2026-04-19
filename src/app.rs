@@ -84,17 +84,19 @@ pub struct App {
     pub input_history: Vec<String>,
     pub history_idx: Option<usize>,
     pub history_draft: String,
+    pub system_prompt_path: Option<String>,
+    pub resolved_model: Option<String>,
 }
 
 impl App {
-    pub fn new(api_key: Option<String>) -> Self {
+    pub fn new(api_key: Option<String>, system_prompt_path: Option<String>) -> Self {
         let mut app = Self {
             messages: vec![],
             api_history: vec![],
             textarea: make_textarea(),
             models: build_models(),
             theme_idx: 0,
-            model_idx: 0,
+            model_idx: 0, // overwritten below
             picker_idx: 0,
             streaming: false,
             current_stream: String::new(),
@@ -111,7 +113,14 @@ impl App {
             input_history: load_input_history(),
             history_idx: None,
             history_draft: String::new(),
+            system_prompt_path,
+            resolved_model: None,
         };
+        if let Some(last_id) = crate::config::load_last_model() {
+            if let Some(idx) = app.models.iter().position(|m| m.id == last_id) {
+                app.model_idx = idx;
+            }
+        }
         if app.api_key.is_none() {
             app.push_system("No API key found. Set ANTHROPIC_API_KEY and restart.".into());
         }
@@ -162,6 +171,9 @@ impl App {
                     confirm = Some(desc);
                     break;
                 }
+                Ok(StreamEvent::ModelResolved(id)) => {
+                    self.resolved_model = Some(id);
+                }
                 Ok(StreamEvent::Done) => {
                     finished = true;
                     break;
@@ -177,11 +189,20 @@ impl App {
         if finished {
             let content = std::mem::take(&mut self.current_stream);
             if !content.is_empty() {
+                let label = self.model().label.to_string();
+                let model_label = match self.resolved_model.take() {
+                    Some(ref id) if id != &self.model().id => {
+                        Some(format!("{} ({})", label, id))
+                    }
+                    _ => Some(label),
+                };
                 self.messages.push(ChatMessage {
                     role: Role::Assistant,
                     content,
-                    model_label: Some(self.model().label.to_string()),
+                    model_label,
                 });
+            } else {
+                self.resolved_model = None;
             }
             self.streaming = false;
             self.stream_handle = None;
@@ -274,13 +295,16 @@ impl App {
         self.streaming = true;
 
         let model_id = self.model().id.clone();
+        let spp = self.system_prompt_path.clone();
         let handle = match provider {
             Provider::Anthropic => tokio::spawn(async move {
-                crate::api::stream_anthropic(api_key, model_id, msgs, tx, confirm_rx).await;
+                crate::api::stream_anthropic(api_key, model_id, msgs, tx, confirm_rx, spp).await;
             }),
             Provider::OpenAiCompat { base_url, .. } => tokio::spawn(async move {
-                crate::api::stream_openai_compat(base_url, api_key, model_id, msgs, tx, confirm_rx)
-                    .await;
+                crate::api::stream_openai_compat(
+                    base_url, api_key, model_id, msgs, tx, confirm_rx, spp,
+                )
+                .await;
             }),
         };
         self.stream_handle = Some(handle);
@@ -309,6 +333,7 @@ impl App {
 
     pub fn confirm_model_select(&mut self) {
         self.model_idx = self.picker_idx;
+        crate::config::save_last_model(&self.models[self.model_idx].id);
         self.push_info(format!("Switched to {}.", self.model().label));
         self.mode = AppMode::Normal;
     }
@@ -519,6 +544,7 @@ impl App {
                         || m.id.to_lowercase().contains(&arg.to_lowercase())
                 }) {
                     self.model_idx = idx;
+                    crate::config::save_last_model(&self.models[idx].id);
                     self.push_info(format!("Switched to {}.", self.models[idx].label));
                 } else {
                     self.push_system(format!(

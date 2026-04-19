@@ -34,7 +34,7 @@ Simple requests go to free/cheap models. Complex reasoning, nuanced writing, and
 ```bash
 git clone https://github.com/yourusername/pantheon
 cd pantheon
-pip install -e .
+cargo install --path .
 ```
 
 ## First run
@@ -73,3 +73,20 @@ pan config       # view/edit routing config
 ## Philosophy
 
 The polytheist doesn't pray to one god for everything. Different problems call for different powers. Pantheon routes your requests accordingly.
+### System Prompt
+Pantheon can be started with a custom system prompt by specifying the path to a file in the ``.pantheon`` directory.
+
+     pan -s ~/.pantheon/system_prompt.md
+
+Example:
+
+     cat ~/.pantheon/system_prompt.md
+
+Hello, Pantheon!
+
+You can also set the default system prompt to this custom prompt when starting Pantheon:
+
+     pan --custom-system-prompt ~
+
+Hello, Pantheon!
+

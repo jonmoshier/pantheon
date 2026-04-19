@@ -20,10 +20,16 @@ use app::AppMode;
 async fn main() -> Result<()> {
     let api_key = config::load_api_key("ANTHROPIC_API_KEY");
 
+    let args: Vec<String> = std::env::args().collect();
+    let system_prompt_path = args
+        .windows(2)
+        .find(|w| w[0] == "-s" || w[0] == "--system-prompt")
+        .map(|w| w[1].clone());
+
     enable_raw_mode()?;
     execute!(io::stdout(), EnterAlternateScreen)?;
 
-    let result = run(app::App::new(api_key)).await;
+    let result = run(app::App::new(api_key, system_prompt_path)).await;
 
     disable_raw_mode().ok();
     execute!(io::stdout(), LeaveAlternateScreen).ok();
