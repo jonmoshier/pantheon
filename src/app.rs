@@ -538,6 +538,102 @@ impl App {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_app() -> App {
+        App::new(Some("test-key".into()))
+    }
+
+    #[test]
+    fn clear_command_empties_messages() {
+        let mut app = make_app();
+        app.messages.push(ChatMessage { role: Role::User, content: "hi".into(), model_label: None });
+        app.handle_command("clear");
+        assert!(app.messages.is_empty());
+    }
+
+    #[test]
+    fn clear_sets_status_msg() {
+        let mut app = make_app();
+        app.handle_command("clear");
+        assert!(app.status_msg.is_some());
+        let (msg, _) = app.status_msg.as_ref().unwrap();
+        assert!(msg.contains("cleared"));
+    }
+
+    #[test]
+    fn unknown_command_adds_system_message() {
+        let mut app = make_app();
+        app.handle_command("nope");
+        let last = app.messages.last().unwrap();
+        assert!(matches!(last.role, Role::System));
+        assert!(last.content.contains("unknown command"));
+    }
+
+    #[test]
+    fn model_command_with_arg_switches_model() {
+        let mut app = make_app();
+        let initial_idx = app.model_idx;
+        if app.models.len() > 1 {
+            let other_label = app.models[(initial_idx + 1) % app.models.len()].label.clone();
+            app.handle_command(&format!("model {}", other_label));
+            assert_ne!(app.model_idx, initial_idx);
+        }
+    }
+
+    #[test]
+    fn model_command_unknown_shows_error() {
+        let mut app = make_app();
+        app.handle_command("model zzz_nonexistent_model_zzz");
+        let last = app.messages.last().unwrap();
+        assert!(matches!(last.role, Role::System));
+        assert!(last.content.contains("unknown model"));
+    }
+
+    #[test]
+    fn theme_command_with_arg_switches_theme() {
+        let mut app = make_app();
+        let new_name = if app.theme_idx == 0 { THEMES[1].name } else { THEMES[0].name };
+        app.handle_command(&format!("theme {}", new_name));
+        assert_eq!(app.theme().name, new_name);
+    }
+
+    #[test]
+    fn cycle_theme_wraps_around() {
+        let mut app = make_app();
+        let total = THEMES.len();
+        for _ in 0..total {
+            app.cycle_theme();
+        }
+        assert_eq!(app.theme_idx, 0);
+    }
+
+    #[test]
+    fn push_info_sets_status_msg_with_ticks() {
+        let mut app = make_app();
+        app.push_info("hello".into());
+        let (msg, ticks) = app.status_msg.as_ref().unwrap();
+        assert_eq!(msg, "hello");
+        assert!(*ticks > 0);
+    }
+
+    #[test]
+    fn help_command_opens_help_mode() {
+        let mut app = make_app();
+        app.handle_command("help");
+        assert!(matches!(app.mode, AppMode::Help));
+    }
+
+    #[test]
+    fn quit_command_sets_should_quit() {
+        let mut app = make_app();
+        app.handle_command("quit");
+        assert!(app.should_quit);
+    }
+}
+
 fn load_input_history() -> Vec<String> {
     let path = crate::config::history_file();
     let Ok(content) = std::fs::read_to_string(path) else { return vec![] };

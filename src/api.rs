@@ -901,3 +901,151 @@ async fn collect_openai_stream(
 
     Ok((text, calls))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── truncate ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn truncate_under_limit() {
+        assert_eq!(truncate("hello", 10), "hello");
+    }
+
+    #[test]
+    fn truncate_exact_limit() {
+        assert_eq!(truncate("hello", 5), "hello");
+    }
+
+    #[test]
+    fn truncate_over_limit() {
+        let result = truncate("hello world", 5);
+        assert!(result.starts_with("hello"));
+        assert!(result.contains("truncated"));
+    }
+
+    // ── is_blocked_ip ────────────────────────────────────────────────────────
+
+    #[test]
+    fn blocks_loopback_v4() {
+        let ip: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+        assert!(is_blocked_ip(ip));
+    }
+
+    #[test]
+    fn blocks_loopback_v6() {
+        let ip: std::net::IpAddr = "::1".parse().unwrap();
+        assert!(is_blocked_ip(ip));
+    }
+
+    #[test]
+    fn blocks_private_10() {
+        let ip: std::net::IpAddr = "10.0.0.1".parse().unwrap();
+        assert!(is_blocked_ip(ip));
+    }
+
+    #[test]
+    fn blocks_private_192_168() {
+        let ip: std::net::IpAddr = "192.168.1.1".parse().unwrap();
+        assert!(is_blocked_ip(ip));
+    }
+
+    #[test]
+    fn blocks_private_172_16() {
+        let ip: std::net::IpAddr = "172.16.0.1".parse().unwrap();
+        assert!(is_blocked_ip(ip));
+    }
+
+    #[test]
+    fn blocks_link_local_metadata() {
+        let ip: std::net::IpAddr = "169.254.169.254".parse().unwrap();
+        assert!(is_blocked_ip(ip));
+    }
+
+    #[test]
+    fn blocks_ipv4_mapped_in_ipv6() {
+        let ip: std::net::IpAddr = "::ffff:169.254.169.254".parse().unwrap();
+        assert!(is_blocked_ip(ip));
+    }
+
+    #[test]
+    fn allows_public_ip() {
+        let ip: std::net::IpAddr = "8.8.8.8".parse().unwrap();
+        assert!(!is_blocked_ip(ip));
+    }
+
+    #[test]
+    fn allows_public_ipv6() {
+        let ip: std::net::IpAddr = "2001:4860:4860::8888".parse().unwrap();
+        assert!(!is_blocked_ip(ip));
+    }
+
+    // ── sandbox_path ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn sandbox_allows_existing_file_in_cwd() {
+        let result = sandbox_path("Cargo.toml");
+        assert!(result.is_ok(), "expected Ok, got {:?}", result);
+    }
+
+    #[test]
+    fn sandbox_allows_new_file_in_cwd() {
+        let result = sandbox_path("src/does_not_exist_yet.rs");
+        assert!(result.is_ok(), "expected Ok for new file in src/, got {:?}", result);
+    }
+
+    #[test]
+    fn sandbox_blocks_absolute_outside_cwd() {
+        let result = sandbox_path("/etc/passwd");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("outside the working directory"));
+    }
+
+    #[test]
+    fn sandbox_blocks_traversal_outside_cwd() {
+        let result = sandbox_path("../../etc/passwd");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn sandbox_blocks_home_dir() {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+        let result = sandbox_path(&format!("{}/.ssh/id_rsa", home));
+        assert!(result.is_err());
+    }
+
+    // ── diff_files ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn diff_no_changes_returns_empty() {
+        let result = diff_files("hello\nworld\n", "hello\nworld\n");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn diff_added_line_shows_plus() {
+        let result = diff_files("hello\n", "hello\nworld\n");
+        assert!(result.contains('+'), "expected '+' in diff: {}", result);
+    }
+
+    #[test]
+    fn diff_removed_line_shows_minus() {
+        let result = diff_files("hello\nworld\n", "hello\n");
+        assert!(result.contains('-'), "expected '-' in diff: {}", result);
+    }
+
+    #[test]
+    fn diff_new_file_all_additions() {
+        let result = diff_files("", "line one\nline two\n");
+        assert!(result.contains('+'));
+        assert!(!result.contains('-'));
+    }
+
+    #[test]
+    fn diff_wraps_in_code_block() {
+        let result = diff_files("a\n", "b\n");
+        assert!(result.starts_with("```diff"));
+        assert!(result.ends_with("```"));
+    }
+}

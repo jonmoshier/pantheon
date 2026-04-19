@@ -106,3 +106,58 @@ fn flush(spans: &mut Vec<Span<'static>>, lines: &mut Vec<Line<'static>>) {
         lines.push(Line::from(spans.drain(..).collect::<Vec<_>>()));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::theme::THEMES;
+
+    fn theme() -> &'static Theme {
+        &THEMES[0]
+    }
+
+    fn text_content(lines: &[Line<'static>]) -> String {
+        lines.iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect::<Vec<_>>()
+            .join("")
+    }
+
+    #[test]
+    fn plain_text_renders_as_single_line() {
+        let lines = to_lines("hello world", theme());
+        let content = text_content(&lines);
+        assert!(content.contains("hello world"));
+    }
+
+    #[test]
+    fn code_block_indented_with_spaces() {
+        let lines = to_lines("```\nfoo\n```", theme());
+        let code_line = lines.iter().find(|l| {
+            l.spans.iter().any(|s| s.content.contains("foo"))
+        });
+        assert!(code_line.is_some());
+        let first_span = &code_line.unwrap().spans[0];
+        assert!(first_span.content.starts_with("  "), "expected indented code, got: {:?}", first_span.content);
+    }
+
+    #[test]
+    fn empty_input_returns_empty_lines() {
+        let lines = to_lines("", theme());
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn bullet_list_includes_bullet_char() {
+        let lines = to_lines("- item one\n- item two", theme());
+        let content = text_content(&lines);
+        assert!(content.contains('•'), "expected bullet char in: {}", content);
+    }
+
+    #[test]
+    fn inline_code_renders() {
+        let lines = to_lines("use `cargo test`", theme());
+        let content = text_content(&lines);
+        assert!(content.contains("cargo test"));
+    }
+}
