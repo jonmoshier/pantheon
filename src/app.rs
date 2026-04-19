@@ -191,9 +191,7 @@ impl App {
             if !content.is_empty() {
                 let label = self.model().label.to_string();
                 let model_label = match self.resolved_model.take() {
-                    Some(ref id) if id != &self.model().id => {
-                        Some(format!("{} ({})", label, id))
-                    }
+                    Some(ref id) if id != &self.model().id => Some(format!("{} ({})", label, id)),
                     _ => Some(label),
                 };
                 self.messages.push(ChatMessage {

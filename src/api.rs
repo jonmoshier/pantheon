@@ -706,8 +706,15 @@ pub async fn stream_anthropic(
     mut confirm_rx: mpsc::Receiver<bool>,
     system_prompt_path: Option<String>,
 ) {
-    if let Err(e) =
-        anthropic_loop(api_key, model, messages, &tx, &mut confirm_rx, system_prompt_path.as_deref()).await
+    if let Err(e) = anthropic_loop(
+        api_key,
+        model,
+        messages,
+        &tx,
+        &mut confirm_rx,
+        system_prompt_path.as_deref(),
+    )
+    .await
     {
         tx.send(StreamEvent::Error(e.to_string())).await.ok();
     }
@@ -767,9 +774,11 @@ async fn anthropic_loop(
 
         if calls.is_empty() {
             if text.is_empty() {
-                tx.send(StreamEvent::Error("model returned empty response".to_string()))
-                    .await
-                    .ok();
+                tx.send(StreamEvent::Error(
+                    "model returned empty response".to_string(),
+                ))
+                .await
+                .ok();
             } else {
                 new_msgs.push(json!({"role": "assistant", "content": text}));
             }
@@ -967,9 +976,11 @@ async fn openai_loop(
 
         if calls.is_empty() {
             if text.is_empty() {
-                tx.send(StreamEvent::Error("model returned empty response".to_string()))
-                    .await
-                    .ok();
+                tx.send(StreamEvent::Error(
+                    "model returned empty response".to_string(),
+                ))
+                .await
+                .ok();
             } else {
                 new_msgs.push(json!({"role": "assistant", "content": text}));
             }
@@ -1052,9 +1063,12 @@ async fn collect_openai_stream(
             let v: Value = match serde_json::from_str(data) {
                 Ok(v) => v,
                 Err(e) => {
-                    tx.send(StreamEvent::Error(format!("stream parse error: {}: {}", e, data)))
-                        .await
-                        .ok();
+                    tx.send(StreamEvent::Error(format!(
+                        "stream parse error: {}: {}",
+                        e, data
+                    )))
+                    .await
+                    .ok();
                     continue;
                 }
             };
