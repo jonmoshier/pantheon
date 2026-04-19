@@ -73,9 +73,11 @@ pub fn load_model_defs() -> Vec<ModelDef> {
 
     match toml::from_str::<ModelsFile>(&contents) {
         Ok(f) if !f.models.is_empty() => f.models,
-        _ => toml::from_str::<ModelsFile>(DEFAULT_MODELS_TOML)
-            .expect("default models TOML is valid")
-            .models,
+        _ => {
+            toml::from_str::<ModelsFile>(DEFAULT_MODELS_TOML)
+                .expect("default models TOML is valid")
+                .models
+        }
     }
 }
 

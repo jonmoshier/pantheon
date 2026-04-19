@@ -62,8 +62,11 @@ fn sandbox_path(path: &str) -> Result<String, String> {
 // ── SSRF protection ───────────────────────────────────────────────────────────
 
 fn is_blocked_ipv4(v4: std::net::Ipv4Addr) -> bool {
-    v4.is_loopback() || v4.is_private() || v4.is_link_local()
-        || v4.is_broadcast() || v4.is_unspecified()
+    v4.is_loopback()
+        || v4.is_private()
+        || v4.is_link_local()
+        || v4.is_broadcast()
+        || v4.is_unspecified()
 }
 
 fn is_blocked_ip(ip: std::net::IpAddr) -> bool {
@@ -80,15 +83,20 @@ fn is_blocked_ip(ip: std::net::IpAddr) -> bool {
 }
 
 async fn check_ssrf(url_str: &str) -> Result<(), String> {
-    let url = url::Url::parse(url_str)
-        .map_err(|e| format!("error: invalid URL: {}", e))?;
+    let url = url::Url::parse(url_str).map_err(|e| format!("error: invalid URL: {}", e))?;
 
     match url.scheme() {
         "http" | "https" => {}
-        s => return Err(format!("error: scheme '{}' not allowed — only http/https", s)),
+        s => {
+            return Err(format!(
+                "error: scheme '{}' not allowed — only http/https",
+                s
+            ))
+        }
     }
 
-    let host = url.host_str()
+    let host = url
+        .host_str()
         .ok_or_else(|| "error: URL has no host".to_string())?;
 
     let ips: Vec<std::net::IpAddr> = if let Ok(ip) = host.parse::<std::net::IpAddr>() {
@@ -125,28 +133,44 @@ async fn run_tool(
     match name {
         "read_file" => {
             let path = input["path"].as_str().unwrap_or("");
-            let path = match sandbox_path(path) { Ok(p) => p, Err(e) => return e };
+            let path = match sandbox_path(path) {
+                Ok(p) => p,
+                Err(e) => return e,
+            };
             let desc = format!("read file: {}", path);
-            if !prompt_confirm(&desc, tx, confirm_rx).await { return "Action denied by user. Ask what they would like you to do instead, or try a different approach.".into(); }
+            if !prompt_confirm(&desc, tx, confirm_rx).await {
+                return "Action denied by user. Ask what they would like you to do instead, or try a different approach.".into();
+            }
             match std::fs::read_to_string(&path) {
                 Ok(content) => {
-                    tx.send(StreamEvent::Delta(format!("← _read {} bytes_\n\n", content.len())))
-                        .await.ok();
+                    tx.send(StreamEvent::Delta(format!(
+                        "← _read {} bytes_\n\n",
+                        content.len()
+                    )))
+                    .await
+                    .ok();
                     content
                 }
                 Err(e) => {
                     let msg = format!("error: {}", e);
-                    tx.send(StreamEvent::Delta(format!("← _{}_\n\n", msg))).await.ok();
+                    tx.send(StreamEvent::Delta(format!("← _{}_\n\n", msg)))
+                        .await
+                        .ok();
                     msg
                 }
             }
         }
         "write_file" => {
             let path = input["path"].as_str().unwrap_or("");
-            let path = match sandbox_path(path) { Ok(p) => p, Err(e) => return e };
+            let path = match sandbox_path(path) {
+                Ok(p) => p,
+                Err(e) => return e,
+            };
             let content = input["content"].as_str().unwrap_or("");
             let desc = format!("write {} bytes → {}", content.len(), path);
-            if !prompt_confirm(&desc, tx, confirm_rx).await { return "Action denied by user. Ask what they would like you to do instead, or try a different approach.".into(); }
+            if !prompt_confirm(&desc, tx, confirm_rx).await {
+                return "Action denied by user. Ask what they would like you to do instead, or try a different approach.".into();
+            }
             let old_content = std::fs::read_to_string(&path).unwrap_or_default();
             match std::fs::write(&path, content) {
                 Ok(_) => {
@@ -161,23 +185,38 @@ async fn run_tool(
                 }
                 Err(e) => {
                     let msg = format!("error: {}", e);
-                    tx.send(StreamEvent::Delta(format!("← _{}_\n\n", msg))).await.ok();
+                    tx.send(StreamEvent::Delta(format!("← _{}_\n\n", msg)))
+                        .await
+                        .ok();
                     msg
                 }
             }
         }
         "append_file" => {
             let path = input["path"].as_str().unwrap_or("");
-            let path = match sandbox_path(path) { Ok(p) => p, Err(e) => return e };
+            let path = match sandbox_path(path) {
+                Ok(p) => p,
+                Err(e) => return e,
+            };
             let content = input["content"].as_str().unwrap_or("");
             let desc = format!("append {} bytes → {}", content.len(), path);
-            if !prompt_confirm(&desc, tx, confirm_rx).await { return "Action denied by user. Ask what they would like you to do instead, or try a different approach.".into(); }
+            if !prompt_confirm(&desc, tx, confirm_rx).await {
+                return "Action denied by user. Ask what they would like you to do instead, or try a different approach.".into();
+            }
             use std::io::Write as _;
-            match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            match std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+            {
                 Ok(mut file) => match file.write_all(content.as_bytes()) {
                     Ok(_) => {
-                        tx.send(StreamEvent::Delta(format!("← _appended {} bytes_\n\n", content.len())))
-                            .await.ok();
+                        tx.send(StreamEvent::Delta(format!(
+                            "← _appended {} bytes_\n\n",
+                            content.len()
+                        )))
+                        .await
+                        .ok();
                         "ok".to_string()
                     }
                     Err(e) => format!("error: {}", e),
@@ -187,9 +226,14 @@ async fn run_tool(
         }
         "list_dir" => {
             let path = input["path"].as_str().unwrap_or(".");
-            let path = match sandbox_path(path) { Ok(p) => p, Err(e) => return e };
+            let path = match sandbox_path(path) {
+                Ok(p) => p,
+                Err(e) => return e,
+            };
             let desc = format!("list dir: {}", path);
-            if !prompt_confirm(&desc, tx, confirm_rx).await { return "Action denied by user. Ask what they would like you to do instead, or try a different approach.".into(); }
+            if !prompt_confirm(&desc, tx, confirm_rx).await {
+                return "Action denied by user. Ask what they would like you to do instead, or try a different approach.".into();
+            }
             match std::fs::read_dir(&path) {
                 Ok(entries) => {
                     let mut names: Vec<String> = entries
@@ -204,8 +248,12 @@ async fn run_tool(
                         })
                         .collect();
                     names.sort();
-                    tx.send(StreamEvent::Delta(format!("← _listed {} entries_\n\n", names.len())))
-                        .await.ok();
+                    tx.send(StreamEvent::Delta(format!(
+                        "← _listed {} entries_\n\n",
+                        names.len()
+                    )))
+                    .await
+                    .ok();
                     names.join("\n")
                 }
                 Err(e) => format!("error: {}", e),
@@ -213,21 +261,39 @@ async fn run_tool(
         }
         "search_files" => {
             let path = input["path"].as_str().unwrap_or(".");
-            let path = match sandbox_path(path) { Ok(p) => p, Err(e) => return e };
+            let path = match sandbox_path(path) {
+                Ok(p) => p,
+                Err(e) => return e,
+            };
             let pattern = input["pattern"].as_str().unwrap_or("");
             let desc = format!("search '{}' in {}", pattern, path);
-            if !prompt_confirm(&desc, tx, confirm_rx).await { return "Action denied by user. Ask what they would like you to do instead, or try a different approach.".into(); }
+            if !prompt_confirm(&desc, tx, confirm_rx).await {
+                return "Action denied by user. Ask what they would like you to do instead, or try a different approach.".into();
+            }
             let cmd = format!(
                 "grep -rn --include='*' '{}' '{}' 2>/dev/null | head -200",
                 pattern.replace('\'', "'\\''"),
                 path.replace('\'', "'\\''"),
             );
-            match tokio::process::Command::new("sh").arg("-c").arg(&cmd).output().await {
+            match tokio::process::Command::new("sh")
+                .arg("-c")
+                .arg(&cmd)
+                .output()
+                .await
+            {
                 Ok(out) => {
                     let result = String::from_utf8_lossy(&out.stdout).to_string();
-                    tx.send(StreamEvent::Delta(format!("← _search: {} bytes_\n\n", result.len())))
-                        .await.ok();
-                    if result.is_empty() { "no matches".into() } else { result }
+                    tx.send(StreamEvent::Delta(format!(
+                        "← _search: {} bytes_\n\n",
+                        result.len()
+                    )))
+                    .await
+                    .ok();
+                    if result.is_empty() {
+                        "no matches".into()
+                    } else {
+                        result
+                    }
                 }
                 Err(e) => format!("error: {}", e),
             }
@@ -235,7 +301,9 @@ async fn run_tool(
         "run_shell" => {
             let command = input["command"].as_str().unwrap_or("");
             let desc = format!("$ {}", command);
-            if !prompt_confirm(&desc, tx, confirm_rx).await { return "Action denied by user. Ask what they would like you to do instead, or try a different approach.".into(); }
+            if !prompt_confirm(&desc, tx, confirm_rx).await {
+                return "Action denied by user. Ask what they would like you to do instead, or try a different approach.".into();
+            }
 
             let mut child = match tokio::process::Command::new("sh")
                 .arg("-c")
@@ -257,26 +325,38 @@ async fn run_tool(
                     truncated = true;
                     break;
                 }
-                tx.send(StreamEvent::Delta(format!("{}\n", line))).await.ok();
+                tx.send(StreamEvent::Delta(format!("{}\n", line)))
+                    .await
+                    .ok();
                 output.push_str(&line);
                 output.push('\n');
             }
 
-            let exit_code = child.wait().await
+            let exit_code = child
+                .wait()
+                .await
                 .map(|s| s.code().unwrap_or(-1))
                 .unwrap_or(-1);
 
             let suffix = if truncated { " (truncated)" } else { "" };
-            tx.send(StreamEvent::Delta(format!("\n← _exit {}{}_\n\n", exit_code, suffix)))
-                .await.ok();
+            tx.send(StreamEvent::Delta(format!(
+                "\n← _exit {}{}_\n\n",
+                exit_code, suffix
+            )))
+            .await
+            .ok();
 
             output
         }
         "fetch_url" => {
             let url = input["url"].as_str().unwrap_or("");
-            if let Err(e) = check_ssrf(url).await { return e; }
+            if let Err(e) = check_ssrf(url).await {
+                return e;
+            }
             let desc = format!("fetch {}", url);
-            if !prompt_confirm(&desc, tx, confirm_rx).await { return "Action denied by user. Ask what they would like you to do instead, or try a different approach.".into(); }
+            if !prompt_confirm(&desc, tx, confirm_rx).await {
+                return "Action denied by user. Ask what they would like you to do instead, or try a different approach.".into();
+            }
             let client = Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
@@ -287,8 +367,13 @@ async fn run_tool(
                     match resp.text().await {
                         Ok(body) => {
                             let truncated = truncate(&body, 50_000);
-                            tx.send(StreamEvent::Delta(format!("← _HTTP {}, {} bytes_\n\n", status, truncated.len())))
-                                .await.ok();
+                            tx.send(StreamEvent::Delta(format!(
+                                "← _HTTP {}, {} bytes_\n\n",
+                                status,
+                                truncated.len()
+                            )))
+                            .await
+                            .ok();
                             truncated
                         }
                         Err(e) => format!("error reading body: {}", e),
@@ -301,13 +386,17 @@ async fn run_tool(
             let task = input["task"].as_str().unwrap_or("");
             let directory = input["directory"].as_str();
             let desc = format!("delegate to Claude Code: {}", task);
-            if !prompt_confirm(&desc, tx, confirm_rx).await { return "Action denied by user. Ask what they would like you to do instead, or try a different approach.".into(); }
+            if !prompt_confirm(&desc, tx, confirm_rx).await {
+                return "Action denied by user. Ask what they would like you to do instead, or try a different approach.".into();
+            }
 
             let mut cmd = tokio::process::Command::new("claude");
-            cmd.arg("--output-format").arg("stream-json")
-               .arg("--print").arg(task)
-               .stdout(std::process::Stdio::piped())
-               .stderr(std::process::Stdio::piped());
+            cmd.arg("--output-format")
+                .arg("stream-json")
+                .arg("--print")
+                .arg(task)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
 
             if let Some(dir) = directory {
                 cmd.current_dir(dir);
@@ -334,12 +423,16 @@ async fn run_tool(
                                 match block["type"].as_str().unwrap_or("") {
                                     "text" => {
                                         if let Some(text) = block["text"].as_str() {
-                                            tx.send(StreamEvent::Delta(text.to_string())).await.ok();
+                                            tx.send(StreamEvent::Delta(text.to_string()))
+                                                .await
+                                                .ok();
                                         }
                                     }
                                     "tool_use" => {
                                         let name = block["name"].as_str().unwrap_or("tool");
-                                        tx.send(StreamEvent::Delta(format!("\n→ **{}**\n", name))).await.ok();
+                                        tx.send(StreamEvent::Delta(format!("\n→ **{}**\n", name)))
+                                            .await
+                                            .ok();
                                     }
                                     _ => {}
                                 }
@@ -375,7 +468,9 @@ async fn prompt_confirm(
     tx: &mpsc::Sender<StreamEvent>,
     confirm_rx: &mut mpsc::Receiver<bool>,
 ) -> bool {
-    tx.send(StreamEvent::ConfirmRequest(desc.to_string())).await.ok();
+    tx.send(StreamEvent::ConfirmRequest(desc.to_string()))
+        .await
+        .ok();
     confirm_rx.recv().await.unwrap_or(false)
 }
 
@@ -618,7 +713,9 @@ async fn anthropic_loop(
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            tx.send(StreamEvent::Error(format!("{}: {}", status, body))).await.ok();
+            tx.send(StreamEvent::Error(format!("{}: {}", status, body)))
+                .await
+                .ok();
             return Ok(());
         }
 
@@ -688,9 +785,15 @@ async fn collect_anthropic_stream(
                     if block["type"] == "tool_use" {
                         let id = block["id"].as_str().unwrap_or("").to_string();
                         let name = block["name"].as_str().unwrap_or("").to_string();
-                        tx.send(StreamEvent::Delta(format!("\n→ **{}**", name))).await.ok();
+                        tx.send(StreamEvent::Delta(format!("\n→ **{}**", name)))
+                            .await
+                            .ok();
                         cur_tool = Some(calls.len());
-                        calls.push(AnthropicToolCall { id, name, input_json: String::new() });
+                        calls.push(AnthropicToolCall {
+                            id,
+                            name,
+                            input_json: String::new(),
+                        });
                     } else {
                         cur_tool = None;
                     }
@@ -780,7 +883,9 @@ async fn openai_loop(
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            tx.send(StreamEvent::Error(format!("{}: {}", status, body))).await.ok();
+            tx.send(StreamEvent::Error(format!("{}: {}", status, body)))
+                .await
+                .ok();
             return Ok(());
         }
 
@@ -791,11 +896,16 @@ async fn openai_loop(
             break;
         }
 
-        let tool_calls_json: Vec<Value> = calls.iter().map(|tc| json!({
-            "id": tc.id,
-            "type": "function",
-            "function": { "name": tc.name, "arguments": tc.arguments }
-        })).collect();
+        let tool_calls_json: Vec<Value> = calls
+            .iter()
+            .map(|tc| {
+                json!({
+                    "id": tc.id,
+                    "type": "function",
+                    "function": { "name": tc.name, "arguments": tc.arguments }
+                })
+            })
+            .collect();
 
         let assistant_msg = json!({
             "role": "assistant",
@@ -876,7 +986,9 @@ async fn collect_openai_stream(
                     }
                     if let Some(name) = delta["function"]["name"].as_str() {
                         calls[idx].name = name.to_string();
-                        tx.send(StreamEvent::Delta(format!("\n→ **{}**", name))).await.ok();
+                        tx.send(StreamEvent::Delta(format!("\n→ **{}**", name)))
+                            .await
+                            .ok();
                     }
                     if let Some(args) = delta["function"]["arguments"].as_str() {
                         calls[idx].arguments.push_str(args);
@@ -886,8 +998,7 @@ async fn collect_openai_stream(
 
             if choice["finish_reason"] == "tool_calls" {
                 for tc in &calls {
-                    let args: Value =
-                        serde_json::from_str(&tc.arguments).unwrap_or(Value::Null);
+                    let args: Value = serde_json::from_str(&tc.arguments).unwrap_or(Value::Null);
                     tx.send(StreamEvent::Delta(format!(
                         " `{}`\n",
                         tool_hint(&tc.name, &args)
@@ -992,14 +1103,20 @@ mod tests {
     #[test]
     fn sandbox_allows_new_file_in_cwd() {
         let result = sandbox_path("src/does_not_exist_yet.rs");
-        assert!(result.is_ok(), "expected Ok for new file in src/, got {:?}", result);
+        assert!(
+            result.is_ok(),
+            "expected Ok for new file in src/, got {:?}",
+            result
+        );
     }
 
     #[test]
     fn sandbox_blocks_absolute_outside_cwd() {
         let result = sandbox_path("/etc/passwd");
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("outside the working directory"));
+        assert!(result
+            .unwrap_err()
+            .contains("outside the working directory"));
     }
 
     #[test]
