@@ -57,6 +57,7 @@ pub struct ChatMessage {
 pub enum AppMode {
     Normal,
     ModelSelect,
+    Help,
     Confirm(String),
 }
 
@@ -78,6 +79,7 @@ pub struct App {
     pub mode: AppMode,
     pub spinner_tick: u8,
     pub confirm_tx: Option<mpsc::Sender<bool>>,
+    pub status_msg: Option<(String, u8)>,
 }
 
 impl App {
@@ -100,6 +102,7 @@ impl App {
             mode: AppMode::Normal,
             spinner_tick: 0,
             confirm_tx: None,
+            status_msg: None,
         };
         if app.api_key.is_none() {
             app.push_system(
@@ -119,10 +122,18 @@ impl App {
 
     pub fn cycle_theme(&mut self) {
         self.theme_idx = (self.theme_idx + 1) % THEMES.len();
-        self.push_system(format!("theme: {}", self.theme().name));
+        self.push_info(format!("theme: {}", self.theme().name));
     }
 
     pub fn poll_stream(&mut self) {
+        if let Some((_, ref mut ticks)) = self.status_msg {
+            if *ticks == 0 {
+                self.status_msg = None;
+            } else {
+                *ticks = ticks.saturating_sub(1);
+            }
+        }
+
         let mut rx = match self.stream_rx.take() {
             Some(r) => r,
             None => return,
@@ -168,12 +179,14 @@ impl App {
             }
             self.streaming = false;
             self.stream_handle = None;
+            self.confirm_tx = None;
             self.auto_scroll = true;
         } else if let Some(e) = error {
             self.push_system(format!("error: {}", e));
             self.current_stream.clear();
             self.streaming = false;
             self.stream_handle = None;
+            self.confirm_tx = None;
             self.auto_scroll = true;
         } else if let Some(desc) = confirm {
             self.mode = AppMode::Confirm(desc);
@@ -271,7 +284,7 @@ impl App {
         self.confirm_tx = None;
         self.mode = AppMode::Normal;
         self.current_stream.clear();
-        self.push_system("Request cancelled.".into());
+        self.push_info("Request cancelled.".into());
     }
 
     pub fn open_model_picker(&mut self) {
@@ -285,7 +298,7 @@ impl App {
 
     pub fn confirm_model_select(&mut self) {
         self.model_idx = self.picker_idx;
-        self.push_system(format!("Switched to {}.", self.model().label));
+        self.push_info(format!("Switched to {}.", self.model().label));
         self.mode = AppMode::Normal;
     }
 
@@ -311,6 +324,14 @@ impl App {
         self.scroll_offset = self.scroll_offset.saturating_add(3);
     }
 
+    pub fn open_help(&mut self) {
+        self.mode = AppMode::Help;
+    }
+
+    pub fn close_help(&mut self) {
+        self.mode = AppMode::Normal;
+    }
+
     fn handle_command(&mut self, cmd: &str) {
         let mut parts = cmd.splitn(2, ' ');
         let verb = parts.next().unwrap_or("").to_lowercase();
@@ -320,6 +341,9 @@ impl App {
             "quit" | "exit" | "q" => {
                 self.should_quit = true;
             }
+            "help" | "h" | "?" => {
+                self.open_help();
+            }
             "model" => {
                 if arg.is_empty() {
                     self.open_model_picker();
@@ -328,7 +352,7 @@ impl App {
                         || m.id.to_lowercase().contains(&arg.to_lowercase())
                 }) {
                     self.model_idx = idx;
-                    self.push_system(format!("Switched to {}.", MODELS[idx].label));
+                    self.push_info(format!("Switched to {}.", MODELS[idx].label));
                 } else {
                     self.push_system(format!(
                         "unknown model '{}' — try haiku, sonnet, or opus",
@@ -354,7 +378,7 @@ impl App {
                     ));
                 } else if let Some(idx) = THEMES.iter().position(|t| t.name == arg) {
                     self.theme_idx = idx;
-                    self.push_system(format!("theme: {}", THEMES[idx].name));
+                    self.push_info(format!("theme: {}", THEMES[idx].name));
                 } else {
                     let names = THEMES.iter().map(|t| t.name).collect::<Vec<_>>().join(", ");
                     self.push_system(format!("unknown theme '{}' — try: {}", arg, names));
@@ -362,11 +386,15 @@ impl App {
             }
             _ => {
                 self.push_system(format!(
-                    "unknown command /{} — try /model, /theme, or /quit",
+                    "unknown command /{} — try /help, /model, /theme, or /quit",
                     verb
                 ));
             }
         }
+    }
+
+    pub fn push_info(&mut self, msg: String) {
+        self.status_msg = Some((msg, 60));
     }
 
     fn push_system(&mut self, content: String) {
@@ -384,7 +412,7 @@ fn make_textarea() -> TextArea<'static> {
     ta.set_cursor_line_style(Style::default());
     ta.set_style(Style::default().fg(Color::Rgb(212, 212, 212)).bg(Color::Rgb(24, 24, 24)));
     ta.set_cursor_style(Style::default().add_modifier(Modifier::REVERSED));
-    ta.set_placeholder_text("Message… (Enter to send · Alt+Enter for newline · Ctrl+P for model)");
+    ta.set_placeholder_text("Message… (Enter to send · Alt+Enter for newline · Ctrl+P for model · /help for commands)");
     ta.set_placeholder_style(Style::default().fg(Color::Rgb(85, 85, 85)));
     ta
 }

@@ -88,10 +88,16 @@ async fn run(mut app: app::App) -> Result<()> {
                         KeyCode::Down | KeyCode::Char('j') => app.picker_down(),
                         _ => {}
                     },
+                    AppMode::Help => match key.code {
+                        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Enter | KeyCode::Char(' ') => {
+                            app.close_help();
+                        }
+                        _ => {}
+                    },
                     AppMode::Confirm(_) => {
                         let approved = matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter);
                         if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter | KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc) {
-                            if let Some(tx) = app.confirm_tx.take() {
+                            if let Some(ref tx) = app.confirm_tx {
                                 tx.send(approved).await.ok();
                             }
                             app.mode = app::AppMode::Normal;

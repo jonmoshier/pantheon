@@ -1,6 +1,7 @@
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde_json::{json, Value};
+use tokio::io::AsyncBufReadExt;
 use tokio::sync::mpsc;
 
 pub enum StreamEvent {
@@ -38,15 +39,17 @@ async fn run_tool(
     match name {
         "read_file" => {
             let path = input["path"].as_str().unwrap_or("");
+            let desc = format!("read file: {}", path);
+            if !prompt_confirm(&desc, tx, confirm_rx).await { return "denied".into(); }
             match std::fs::read_to_string(path) {
                 Ok(content) => {
-                    tx.send(StreamEvent::Delta(format!("← _read {} bytes_\n", content.len())))
+                    tx.send(StreamEvent::Delta(format!("← _read {} bytes_\n\n", content.len())))
                         .await.ok();
                     content
                 }
                 Err(e) => {
                     let msg = format!("error: {}", e);
-                    tx.send(StreamEvent::Delta(format!("← _{}_\n", msg))).await.ok();
+                    tx.send(StreamEvent::Delta(format!("← _{}_\n\n", msg))).await.ok();
                     msg
                 }
             }
@@ -56,13 +59,13 @@ async fn run_tool(
             let content = input["content"].as_str().unwrap_or("");
             match std::fs::write(path, content) {
                 Ok(_) => {
-                    tx.send(StreamEvent::Delta(format!("← _wrote {} bytes_\n", content.len())))
+                    tx.send(StreamEvent::Delta(format!("← _wrote {} bytes_\n\n", content.len())))
                         .await.ok();
                     "ok".to_string()
                 }
                 Err(e) => {
                     let msg = format!("error: {}", e);
-                    tx.send(StreamEvent::Delta(format!("← _{}_\n", msg))).await.ok();
+                    tx.send(StreamEvent::Delta(format!("← _{}_\n\n", msg))).await.ok();
                     msg
                 }
             }
@@ -76,7 +79,7 @@ async fn run_tool(
             match std::fs::OpenOptions::new().create(true).append(true).open(path) {
                 Ok(mut file) => match file.write_all(content.as_bytes()) {
                     Ok(_) => {
-                        tx.send(StreamEvent::Delta(format!("← _appended {} bytes_\n", content.len())))
+                        tx.send(StreamEvent::Delta(format!("← _appended {} bytes_\n\n", content.len())))
                             .await.ok();
                         "ok".to_string()
                     }
@@ -103,7 +106,7 @@ async fn run_tool(
                         })
                         .collect();
                     names.sort();
-                    tx.send(StreamEvent::Delta(format!("← _listed {} entries_\n", names.len())))
+                    tx.send(StreamEvent::Delta(format!("← _listed {} entries_\n\n", names.len())))
                         .await.ok();
                     names.join("\n")
                 }
@@ -123,7 +126,7 @@ async fn run_tool(
             match tokio::process::Command::new("sh").arg("-c").arg(&cmd).output().await {
                 Ok(out) => {
                     let result = String::from_utf8_lossy(&out.stdout).to_string();
-                    tx.send(StreamEvent::Delta(format!("← _search: {} bytes_\n", result.len())))
+                    tx.send(StreamEvent::Delta(format!("← _search: {} bytes_\n\n", result.len())))
                         .await.ok();
                     if result.is_empty() { "no matches".into() } else { result }
                 }
@@ -144,7 +147,7 @@ async fn run_tool(
                         format!("{}\nstderr:\n{}", stdout, stderr)
                     };
                     let truncated = truncate(&combined, 20_000);
-                    tx.send(StreamEvent::Delta(format!("← _exit {}, {} bytes_\n", out.status.code().unwrap_or(-1), truncated.len())))
+                    tx.send(StreamEvent::Delta(format!("← _exit {}, {} bytes_\n\n", out.status.code().unwrap_or(-1), truncated.len())))
                         .await.ok();
                     truncated
                 }
@@ -161,7 +164,7 @@ async fn run_tool(
                     match resp.text().await {
                         Ok(body) => {
                             let truncated = truncate(&body, 50_000);
-                            tx.send(StreamEvent::Delta(format!("← _HTTP {}, {} bytes_\n", status, truncated.len())))
+                            tx.send(StreamEvent::Delta(format!("← _HTTP {}, {} bytes_\n\n", status, truncated.len())))
                                 .await.ok();
                             truncated
                         }
@@ -169,6 +172,75 @@ async fn run_tool(
                     }
                 }
                 Err(e) => format!("error: {}", e),
+            }
+        }
+        "delegate" => {
+            let task = input["task"].as_str().unwrap_or("");
+            let directory = input["directory"].as_str();
+            let desc = format!("delegate to Claude Code: {}", task);
+            if !prompt_confirm(&desc, tx, confirm_rx).await { return "denied".into(); }
+
+            let mut cmd = tokio::process::Command::new("claude");
+            cmd.arg("--output-format").arg("stream-json")
+               .arg("--print").arg(task)
+               .stdout(std::process::Stdio::piped())
+               .stderr(std::process::Stdio::piped());
+
+            if let Some(dir) = directory {
+                cmd.current_dir(dir);
+            }
+
+            let mut child = match cmd.spawn() {
+                Ok(c) => c,
+                Err(e) => return format!("error: could not start claude CLI: {}", e),
+            };
+
+            let stdout = child.stdout.take().unwrap();
+            let mut lines = tokio::io::BufReader::new(stdout).lines();
+            let mut final_result = String::new();
+
+            while let Ok(Some(line)) = lines.next_line().await {
+                let v: Value = match serde_json::from_str(&line) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                match v["type"].as_str().unwrap_or("") {
+                    "assistant" => {
+                        if let Some(content) = v["message"]["content"].as_array() {
+                            for block in content {
+                                match block["type"].as_str().unwrap_or("") {
+                                    "text" => {
+                                        if let Some(text) = block["text"].as_str() {
+                                            tx.send(StreamEvent::Delta(text.to_string())).await.ok();
+                                        }
+                                    }
+                                    "tool_use" => {
+                                        let name = block["name"].as_str().unwrap_or("tool");
+                                        tx.send(StreamEvent::Delta(format!("\n→ **{}**\n", name))).await.ok();
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                    "result" => {
+                        if let Some(r) = v["result"].as_str() {
+                            final_result = r.to_string();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            let status = child.wait().await;
+            let exit_ok = status.map(|s| s.success()).unwrap_or(false);
+            if !exit_ok && final_result.is_empty() {
+                // Read stderr for error info
+                "claude CLI exited with an error".to_string()
+            } else if final_result.is_empty() {
+                "done".to_string()
+            } else {
+                final_result
             }
         }
         _ => format!("unknown tool: {}", name),
@@ -204,6 +276,7 @@ fn tool_hint(name: &str, input: &Value) -> String {
             input["pattern"].as_str().unwrap_or("?"),
             input["path"].as_str().unwrap_or("?")
         ),
+        "delegate" => input["task"].as_str().unwrap_or("?").to_string(),
         _ => String::new(),
     }
 }
@@ -284,6 +357,24 @@ fn anthropic_tool_defs() -> Vec<Value> {
                 "required": ["url"]
             }
         }),
+        json!({
+            "name": "delegate",
+            "description": "Delegate a complex task to Claude Code, a capable sub-agent with full file system access, shell execution, and multi-step reasoning. Use this for coding tasks, refactors, debugging, or anything requiring many tool calls. Claude Code will work autonomously and return a summary when done.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "A clear description of the task for Claude Code to complete."
+                    },
+                    "directory": {
+                        "type": "string",
+                        "description": "Working directory for the task. Defaults to the current directory if omitted."
+                    }
+                },
+                "required": ["task"]
+            }
+        }),
     ]
 }
 
@@ -296,6 +387,7 @@ fn openai_tool_defs() -> Vec<Value> {
         json!({"type":"function","function":{"name":"search_files","description":"Search for a text pattern in files under a directory.","parameters":{"type":"object","properties":{"path":{"type":"string"},"pattern":{"type":"string"}},"required":["path","pattern"]}}}),
         json!({"type":"function","function":{"name":"run_shell","description":"Execute a shell command and return stdout and stderr.","parameters":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}}}),
         json!({"type":"function","function":{"name":"fetch_url","description":"Fetch the contents of a URL via HTTP GET.","parameters":{"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}}}),
+        json!({"type":"function","function":{"name":"delegate","description":"Delegate a complex task to Claude Code, a capable sub-agent with full file system access and multi-step reasoning.","parameters":{"type":"object","properties":{"task":{"type":"string"},"directory":{"type":"string"}},"required":["task"]}}}),
     ]
 }
 

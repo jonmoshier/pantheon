@@ -34,8 +34,9 @@ pub fn render(f: &mut Frame, app: &mut App) {
     if matches!(app.mode, AppMode::ModelSelect) {
         render_model_picker(f, app);
     }
-    if let AppMode::Confirm(ref desc) = app.mode {
-        render_confirm(f, app, desc.clone());
+
+    if matches!(app.mode, AppMode::Help) {
+        render_help_dialog(f, app);
     }
 }
 
@@ -48,13 +49,22 @@ fn render_messages(f: &mut Frame, app: &mut App, area: Rect) {
         Style::default().fg(theme.title).add_modifier(Modifier::BOLD),
     )));
     lines.push(Line::from(Span::styled(
-        "Ctrl+P model  ·  Ctrl+T theme  ·  Ctrl+X cancel  ·  Alt+Enter newline  ·  /quit",
+        "Ctrl+P model  ·  Ctrl+T theme  ·  Ctrl+X cancel  ·  Alt+Enter newline  ·  /help for commands",
         Style::default().fg(theme.dim),
     )));
     lines.push(Line::default());
 
     let sep_width = area.width as usize;
     let sep = "─".repeat(sep_width.min(120));
+
+    // If no messages, show startup hint
+    if app.messages.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "Type /help for a list of commands.",
+            Style::default().fg(theme.dim),
+        )));
+        lines.push(Line::default());
+    }
 
     for msg in &app.messages {
         match msg.role {
@@ -109,7 +119,7 @@ fn render_messages(f: &mut Frame, app: &mut App, area: Rect) {
         }
     }
 
-    let total = lines.len() as u16;
+    let total = wrapped_line_count(&lines, area.width);
     let visible = area.height;
     let max_scroll = total.saturating_sub(visible);
     let scroll = if app.auto_scroll {
@@ -130,14 +140,21 @@ fn render_messages(f: &mut Frame, app: &mut App, area: Rect) {
 
 fn render_status(f: &mut Frame, app: &App, area: Rect) {
     let theme = app.theme();
-    let spinner = SPINNER[app.spinner_tick as usize % SPINNER.len()];
-    let text = if app.streaming {
-        format!("{} {}  streaming", app.model().label, spinner)
+    let (text, fg) = if let AppMode::Confirm(ref desc) = app.mode {
+        (
+            format!("▶ {}   [ Y ] approve   [ N ] deny", desc),
+            theme.user_accent,
+        )
+    } else if let Some((ref msg, _)) = app.status_msg {
+        (msg.clone(), theme.dim)
+    } else if app.streaming {
+        let spinner = SPINNER[app.spinner_tick as usize % SPINNER.len()];
+        (format!("{} {}  streaming", app.model().label, spinner), theme.status_fg)
     } else {
-        app.model().label.to_string()
+        (app.model().label.to_string(), theme.status_fg)
     };
     f.render_widget(
-        Paragraph::new(text).style(Style::default().fg(theme.status_fg).bg(theme.bg)),
+        Paragraph::new(text).style(Style::default().fg(fg).bg(theme.bg)),
         area,
     );
 }
@@ -191,39 +208,101 @@ fn render_model_picker(f: &mut Frame, app: &App) {
     f.render_widget(list, area);
 }
 
-fn render_confirm(f: &mut Frame, app: &App, desc: String) {
+fn render_help_dialog(f: &mut Frame, app: &App) {
     let theme = app.theme();
-    let popup_width = (desc.len() as u16 + 6).max(42).min(f.area().width - 4);
-    let popup_height = 5u16;
+    let popup_width = 70u16;
+    let popup_height = 18u16;
     let area = centered_rect(popup_width, popup_height, f.area());
 
     f.render_widget(Clear, area);
 
-    let content = vec![
-        Line::default(),
-        Line::from(Span::styled(
-            format!("  {}", desc),
-            Style::default().fg(theme.text),
-        )),
-        Line::default(),
-        Line::from(vec![
-            Span::styled("  [ Y ] approve", Style::default().fg(theme.user_accent).add_modifier(Modifier::BOLD)),
-            Span::styled("   [ N ] deny", Style::default().fg(theme.error)),
-        ]),
-    ];
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    // Title
+    lines.push(Line::from(Span::styled(
+        "SLASH COMMANDS",
+        Style::default().fg(theme.user_accent).add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(Span::styled(
+        "  /help              Show this help dialog",
+        Style::default().fg(theme.text),
+    )));
+    lines.push(Line::from(Span::styled(
+        "  /model             Open model picker",
+        Style::default().fg(theme.text),
+    )));
+    lines.push(Line::from(Span::styled(
+        "  /theme             Show available themes",
+        Style::default().fg(theme.text),
+    )));
+    lines.push(Line::from(Span::styled(
+        "  /quit              Exit Pantheon",
+        Style::default().fg(theme.text),
+    )));
+
+    lines.push(Line::default());
+
+    lines.push(Line::from(Span::styled(
+        "KEYBINDINGS",
+        Style::default().fg(theme.user_accent).add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(Span::styled(
+        "  Enter              Send message",
+        Style::default().fg(theme.text),
+    )));
+    lines.push(Line::from(Span::styled(
+        "  Alt+Enter          Insert newline",
+        Style::default().fg(theme.text),
+    )));
+    lines.push(Line::from(Span::styled(
+        "  Ctrl+P             Open model picker",
+        Style::default().fg(theme.text),
+    )));
+    lines.push(Line::from(Span::styled(
+        "  Ctrl+T             Cycle theme",
+        Style::default().fg(theme.text),
+    )));
+    lines.push(Line::from(Span::styled(
+        "  Ctrl+X             Cancel request",
+        Style::default().fg(theme.text),
+    )));
+    lines.push(Line::from(Span::styled(
+        "  Page Up/Down       Scroll history",
+        Style::default().fg(theme.text),
+    )));
+    lines.push(Line::from(Span::styled(
+        "  Ctrl+C / Ctrl+D    Quit",
+        Style::default().fg(theme.text),
+    )));
+    lines.push(Line::from(Span::styled(
+        "  Esc                Close dialog",
+        Style::default().fg(theme.text),
+    )));
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.border_active))
+        .style(Style::default().bg(theme.surface))
+        .title(" Help ")
+        .title_style(Style::default().fg(theme.dim));
 
     f.render_widget(
-        Paragraph::new(content).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(theme.border_active))
-                .style(Style::default().bg(theme.surface))
-                .title(" Approve Tool ")
-                .title_style(Style::default().fg(theme.dim)),
-        ),
+        Paragraph::new(lines)
+            .block(block)
+            .style(Style::default().bg(theme.surface).fg(theme.text)),
         area,
     );
+}
+
+fn wrapped_line_count(lines: &[Line<'static>], width: u16) -> u16 {
+    if width == 0 {
+        return lines.len() as u16;
+    }
+    lines.iter().map(|line| {
+        let chars: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
+        if chars == 0 { 1 } else { ((chars as u16 - 1) / width) + 1 }
+    }).sum()
 }
 
 fn indent_line(line: Line<'static>) -> Line<'static> {
