@@ -678,6 +678,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tui-textarea",
+ "url",
 ]
 
 [[package]]

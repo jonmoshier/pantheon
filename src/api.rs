@@ -28,6 +28,90 @@ struct OpenAiToolCall {
     arguments: String,
 }
 
+// ── Path sandboxing ───────────────────────────────────────────────────────────
+
+/// Resolves `path` and checks it falls inside CWD (or a subdir).
+/// For existing paths uses `canonicalize`; for new files canonicalizes the parent.
+/// Returns the resolved path string, or an error message to return to the model.
+fn sandbox_path(path: &str) -> Result<String, String> {
+    let cwd = std::env::current_dir().map_err(|e| format!("error: cannot get cwd: {}", e))?;
+    let p = std::path::Path::new(path);
+    let resolved = if p.exists() {
+        p.canonicalize().map_err(|e| format!("error: {}", e))?
+    } else {
+        let parent = p.parent().unwrap_or(std::path::Path::new("."));
+        let canon_parent = if parent == std::path::Path::new("") {
+            cwd.clone()
+        } else {
+            parent.canonicalize().map_err(|e| format!("error: {}", e))?
+        };
+        canon_parent.join(p.file_name().unwrap_or_default())
+    };
+    if resolved.starts_with(&cwd) {
+        Ok(resolved.to_string_lossy().to_string())
+    } else {
+        Err(format!(
+            "error: path '{}' is outside the working directory — access denied",
+            path
+        ))
+    }
+}
+
+// ── SSRF protection ───────────────────────────────────────────────────────────
+
+fn is_blocked_ipv4(v4: std::net::Ipv4Addr) -> bool {
+    v4.is_loopback() || v4.is_private() || v4.is_link_local()
+        || v4.is_broadcast() || v4.is_unspecified()
+}
+
+fn is_blocked_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => is_blocked_ipv4(v4),
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || (v6.segments()[0] & 0xfe00) == 0xfc00  // fc00::/7 unique-local
+                || (v6.segments()[0] & 0xffc0) == 0xfe80  // fe80::/10 link-local
+                || v6.to_ipv4_mapped().is_some_and(is_blocked_ipv4)
+        }
+    }
+}
+
+async fn check_ssrf(url_str: &str) -> Result<(), String> {
+    let url = url::Url::parse(url_str)
+        .map_err(|e| format!("error: invalid URL: {}", e))?;
+
+    match url.scheme() {
+        "http" | "https" => {}
+        s => return Err(format!("error: scheme '{}' not allowed — only http/https", s)),
+    }
+
+    let host = url.host_str()
+        .ok_or_else(|| "error: URL has no host".to_string())?;
+
+    let ips: Vec<std::net::IpAddr> = if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        vec![ip]
+    } else {
+        let port = url.port_or_known_default().unwrap_or(80);
+        tokio::net::lookup_host(format!("{}:{}", host, port))
+            .await
+            .map_err(|e| format!("error: DNS lookup failed: {}", e))?
+            .map(|s| s.ip())
+            .collect()
+    };
+
+    for ip in ips {
+        if is_blocked_ip(ip) {
+            return Err(format!(
+                "error: '{}' resolves to a private/reserved address — access denied",
+                host
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 // ── Shared tool execution ─────────────────────────────────────────────────────
 
 async fn run_tool(
@@ -39,9 +123,10 @@ async fn run_tool(
     match name {
         "read_file" => {
             let path = input["path"].as_str().unwrap_or("");
+            let path = match sandbox_path(path) { Ok(p) => p, Err(e) => return e };
             let desc = format!("read file: {}", path);
             if !prompt_confirm(&desc, tx, confirm_rx).await { return "denied".into(); }
-            match std::fs::read_to_string(path) {
+            match std::fs::read_to_string(&path) {
                 Ok(content) => {
                     tx.send(StreamEvent::Delta(format!("← _read {} bytes_\n\n", content.len())))
                         .await.ok();
@@ -56,10 +141,11 @@ async fn run_tool(
         }
         "write_file" => {
             let path = input["path"].as_str().unwrap_or("");
+            let path = match sandbox_path(path) { Ok(p) => p, Err(e) => return e };
             let content = input["content"].as_str().unwrap_or("");
             let desc = format!("write {} bytes → {}", content.len(), path);
             if !prompt_confirm(&desc, tx, confirm_rx).await { return "denied".into(); }
-            match std::fs::write(path, content) {
+            match std::fs::write(&path, content) {
                 Ok(_) => {
                     tx.send(StreamEvent::Delta(format!("← _wrote {} bytes_\n\n", content.len())))
                         .await.ok();
@@ -74,11 +160,12 @@ async fn run_tool(
         }
         "append_file" => {
             let path = input["path"].as_str().unwrap_or("");
+            let path = match sandbox_path(path) { Ok(p) => p, Err(e) => return e };
             let content = input["content"].as_str().unwrap_or("");
             let desc = format!("append {} bytes → {}", content.len(), path);
             if !prompt_confirm(&desc, tx, confirm_rx).await { return "denied".into(); }
             use std::io::Write as _;
-            match std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
                 Ok(mut file) => match file.write_all(content.as_bytes()) {
                     Ok(_) => {
                         tx.send(StreamEvent::Delta(format!("← _appended {} bytes_\n\n", content.len())))
@@ -92,9 +179,10 @@ async fn run_tool(
         }
         "list_dir" => {
             let path = input["path"].as_str().unwrap_or(".");
+            let path = match sandbox_path(path) { Ok(p) => p, Err(e) => return e };
             let desc = format!("list dir: {}", path);
             if !prompt_confirm(&desc, tx, confirm_rx).await { return "denied".into(); }
-            match std::fs::read_dir(path) {
+            match std::fs::read_dir(&path) {
                 Ok(entries) => {
                     let mut names: Vec<String> = entries
                         .filter_map(|e| e.ok())
@@ -117,6 +205,7 @@ async fn run_tool(
         }
         "search_files" => {
             let path = input["path"].as_str().unwrap_or(".");
+            let path = match sandbox_path(path) { Ok(p) => p, Err(e) => return e };
             let pattern = input["pattern"].as_str().unwrap_or("");
             let desc = format!("search '{}' in {}", pattern, path);
             if !prompt_confirm(&desc, tx, confirm_rx).await { return "denied".into(); }
@@ -158,9 +247,14 @@ async fn run_tool(
         }
         "fetch_url" => {
             let url = input["url"].as_str().unwrap_or("");
+            if let Err(e) = check_ssrf(url).await { return e; }
             let desc = format!("fetch {}", url);
             if !prompt_confirm(&desc, tx, confirm_rx).await { return "denied".into(); }
-            match Client::new().get(url).send().await {
+            let client = Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .unwrap_or_default();
+            match client.get(url).send().await {
                 Ok(resp) => {
                     let status = resp.status();
                     match resp.text().await {

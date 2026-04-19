@@ -17,3 +17,4 @@ futures-util = "0.3"
 anyhow = "1"
 tui-textarea = { version = "0.7", features = ["crossterm"] }
 pulldown-cmark = "0.12"
+url = "2"
