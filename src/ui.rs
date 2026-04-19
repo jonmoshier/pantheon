@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Wrap},
 };
 
-use crate::app::{App, AppMode, Role, MODELS};
+use crate::app::{App, AppMode, Role};
 
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -107,7 +107,7 @@ fn render_messages(f: &mut Frame, app: &mut App, area: Rect) {
 
     if app.streaming {
         let spinner = SPINNER[app.spinner_tick as usize % SPINNER.len()];
-        let label = app.model().label;
+        let label = app.model().label.as_str();
         lines.push(Line::from(Span::styled(
             format!("{} {}", label, spinner),
             Style::default().fg(theme.dim).add_modifier(Modifier::BOLD),
@@ -140,11 +140,9 @@ fn render_messages(f: &mut Frame, app: &mut App, area: Rect) {
 
 fn render_status(f: &mut Frame, app: &App, area: Rect) {
     let theme = app.theme();
-    let (text, fg) = if let AppMode::Confirm(ref desc) = app.mode {
-        (
-            format!("▶ {}   [ Y ] approve   [ N ] deny", desc),
-            theme.user_accent,
-        )
+
+    let (left, fg) = if let AppMode::Confirm(ref desc) = app.mode {
+        (format!("▶ {}   [ Y ] approve   [ N ] deny", desc), theme.user_accent)
     } else if let Some((ref msg, _)) = app.status_msg {
         (msg.clone(), theme.dim)
     } else if app.streaming {
@@ -153,8 +151,26 @@ fn render_status(f: &mut Frame, app: &App, area: Rect) {
     } else {
         (app.model().label.to_string(), theme.status_fg)
     };
+
+    let cwd = std::env::current_dir()
+        .map(|p| {
+            let home = std::env::var("HOME").unwrap_or_default();
+            let s = p.to_string_lossy().to_string();
+            if !home.is_empty() && s.starts_with(&home) {
+                format!("~{}", &s[home.len()..])
+            } else {
+                s
+            }
+        })
+        .unwrap_or_default();
+
+    let line = Line::from(vec![
+        Span::styled(left, Style::default().fg(fg)),
+        Span::styled(format!("  ·  {}", cwd), Style::default().fg(theme.dim)),
+    ]);
+
     f.render_widget(
-        Paragraph::new(text).style(Style::default().fg(fg).bg(theme.bg)),
+        Paragraph::new(line).style(Style::default().bg(theme.bg)),
         area,
     );
 }
@@ -177,12 +193,12 @@ fn render_input(f: &mut Frame, app: &mut App, area: Rect) {
 fn render_model_picker(f: &mut Frame, app: &App) {
     let theme = app.theme();
     let popup_width = 38u16;
-    let popup_height = (MODELS.len() + 2) as u16;
+    let popup_height = (app.models.len() + 2) as u16;
     let area = centered_rect(popup_width, popup_height, f.area());
 
     f.render_widget(Clear, area);
 
-    let items: Vec<ListItem> = MODELS
+    let items: Vec<ListItem> = app.models
         .iter()
         .enumerate()
         .map(|(i, m)| {
@@ -236,6 +252,22 @@ fn render_help_dialog(f: &mut Frame, app: &App) {
         Style::default().fg(theme.text),
     )));
     lines.push(Line::from(Span::styled(
+        "  /save [name]       Save conversation to ~/.pantheon/conversations/",
+        Style::default().fg(theme.text),
+    )));
+    lines.push(Line::from(Span::styled(
+        "  /load [name]       Load a saved conversation (no name = list saves)",
+        Style::default().fg(theme.text),
+    )));
+    lines.push(Line::from(Span::styled(
+        "  /context           Show model, cwd, and loaded context files",
+        Style::default().fg(theme.text),
+    )));
+    lines.push(Line::from(Span::styled(
+        "  /clear             Clear conversation history",
+        Style::default().fg(theme.text),
+    )));
+    lines.push(Line::from(Span::styled(
         "  /quit              Exit Pantheon",
         Style::default().fg(theme.text),
     )));
@@ -248,6 +280,10 @@ fn render_help_dialog(f: &mut Frame, app: &App) {
     )));
     lines.push(Line::from(Span::styled(
         "  Enter              Send message",
+        Style::default().fg(theme.text),
+    )));
+    lines.push(Line::from(Span::styled(
+        "  Alt+Up / Alt+Down  Navigate input history",
         Style::default().fg(theme.text),
     )));
     lines.push(Line::from(Span::styled(

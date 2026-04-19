@@ -1,8 +1,95 @@
 use std::{collections::HashMap, path::PathBuf};
 
+const DEFAULT_MODELS_TOML: &str = r#"
+[[models]]
+label = "Claude Haiku"
+id = "claude-haiku-4-5-20251001"
+provider = "anthropic"
+
+[[models]]
+label = "Claude Sonnet"
+id = "claude-sonnet-4-6"
+provider = "anthropic"
+
+[[models]]
+label = "Claude Opus"
+id = "claude-opus-4-7"
+provider = "anthropic"
+
+[[models]]
+label = "Gemini 2.5 Pro"
+id = "gemini-2.5-pro"
+provider = "openai-compat"
+base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+env_key = "GEMINI_API_KEY"
+
+[[models]]
+label = "Gemini 2.0 Flash"
+id = "gemini-2.0-flash"
+provider = "openai-compat"
+base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+env_key = "GEMINI_API_KEY"
+
+[[models]]
+label = "Groq Llama 3.3 70B"
+id = "llama-3.3-70b-versatile"
+provider = "openai-compat"
+base_url = "https://api.groq.com/openai/v1"
+env_key = "GROQ_API_KEY"
+
+[[models]]
+label = "Groq Llama 3.1 8B"
+id = "llama-3.1-8b-instant"
+provider = "openai-compat"
+base_url = "https://api.groq.com/openai/v1"
+env_key = "GROQ_API_KEY"
+"#;
+
+#[derive(serde::Deserialize)]
+pub struct ModelDef {
+    pub label: String,
+    pub id: String,
+    pub provider: String,
+    pub base_url: Option<String>,
+    pub env_key: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct ModelsFile {
+    models: Vec<ModelDef>,
+}
+
+pub fn load_model_defs() -> Vec<ModelDef> {
+    let path = pantheon_dir().join("models.toml");
+
+    let contents = if path.exists() {
+        std::fs::read_to_string(&path).unwrap_or_default()
+    } else {
+        // Write default file on first run so users can discover and edit it
+        let _ = std::fs::create_dir_all(pantheon_dir());
+        let _ = std::fs::write(&path, DEFAULT_MODELS_TOML.trim_start());
+        DEFAULT_MODELS_TOML.to_string()
+    };
+
+    match toml::from_str::<ModelsFile>(&contents) {
+        Ok(f) if !f.models.is_empty() => f.models,
+        _ => toml::from_str::<ModelsFile>(DEFAULT_MODELS_TOML)
+            .expect("default models TOML is valid")
+            .models,
+    }
+}
+
 pub fn pantheon_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     PathBuf::from(home).join(".pantheon")
+}
+
+pub fn conversations_dir() -> PathBuf {
+    pantheon_dir().join("conversations")
+}
+
+pub fn history_file() -> PathBuf {
+    pantheon_dir().join("history")
 }
 
 pub fn load_api_key(env_key: &str) -> Option<String> {
