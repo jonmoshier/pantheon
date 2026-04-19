@@ -608,7 +608,7 @@ mod tests {
     use super::*;
 
     fn make_app() -> App {
-        App::new(Some("test-key".into()))
+        App::new(Some("test-key".into()), None)
     }
 
     #[test]
