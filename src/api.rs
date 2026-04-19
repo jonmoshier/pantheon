@@ -147,10 +147,16 @@ async fn run_tool(
             let content = input["content"].as_str().unwrap_or("");
             let desc = format!("write {} bytes → {}", content.len(), path);
             if !prompt_confirm(&desc, tx, confirm_rx).await { return "Action denied by user. Ask what they would like you to do instead, or try a different approach.".into(); }
+            let old_content = std::fs::read_to_string(&path).unwrap_or_default();
             match std::fs::write(&path, content) {
                 Ok(_) => {
-                    tx.send(StreamEvent::Delta(format!("← _wrote {} bytes_\n\n", content.len())))
-                        .await.ok();
+                    let diff = diff_files(&old_content, content);
+                    let summary = if diff.is_empty() {
+                        format!("← _wrote {} bytes (no changes)_\n\n", content.len())
+                    } else {
+                        format!("← _wrote {} bytes_\n\n{}\n\n", content.len(), diff)
+                    };
+                    tx.send(StreamEvent::Delta(summary)).await.ok();
                     "ok".to_string()
                 }
                 Err(e) => {
@@ -230,22 +236,41 @@ async fn run_tool(
             let command = input["command"].as_str().unwrap_or("");
             let desc = format!("$ {}", command);
             if !prompt_confirm(&desc, tx, confirm_rx).await { return "Action denied by user. Ask what they would like you to do instead, or try a different approach.".into(); }
-            match tokio::process::Command::new("sh").arg("-c").arg(command).output().await {
-                Ok(out) => {
-                    let stdout = String::from_utf8_lossy(&out.stdout);
-                    let stderr = String::from_utf8_lossy(&out.stderr);
-                    let combined = if stderr.is_empty() {
-                        stdout.to_string()
-                    } else {
-                        format!("{}\nstderr:\n{}", stdout, stderr)
-                    };
-                    let truncated = truncate(&combined, 20_000);
-                    tx.send(StreamEvent::Delta(format!("← _exit {}, {} bytes_\n\n", out.status.code().unwrap_or(-1), truncated.len())))
-                        .await.ok();
-                    truncated
+
+            let mut child = match tokio::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!("({}) 2>&1", command))
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+            {
+                Ok(c) => c,
+                Err(e) => return format!("error: {}", e),
+            };
+
+            let stdout = child.stdout.take().unwrap();
+            let mut lines = tokio::io::BufReader::new(stdout).lines();
+            let mut output = String::new();
+            let mut truncated = false;
+
+            while let Ok(Some(line)) = lines.next_line().await {
+                if output.len() >= 20_000 {
+                    truncated = true;
+                    break;
                 }
-                Err(e) => format!("error: {}", e),
+                tx.send(StreamEvent::Delta(format!("{}\n", line))).await.ok();
+                output.push_str(&line);
+                output.push('\n');
             }
+
+            let exit_code = child.wait().await
+                .map(|s| s.code().unwrap_or(-1))
+                .unwrap_or(-1);
+
+            let suffix = if truncated { " (truncated)" } else { "" };
+            tx.send(StreamEvent::Delta(format!("\n← _exit {}{}_\n\n", exit_code, suffix)))
+                .await.ok();
+
+            output
         }
         "fetch_url" => {
             let url = input["url"].as_str().unwrap_or("");
@@ -352,6 +377,37 @@ async fn prompt_confirm(
 ) -> bool {
     tx.send(StreamEvent::ConfirmRequest(desc.to_string())).await.ok();
     confirm_rx.recv().await.unwrap_or(false)
+}
+
+fn diff_files(old: &str, new: &str) -> String {
+    use similar::{ChangeTag, TextDiff};
+    let diff = TextDiff::from_lines(old, new);
+    let mut out = String::new();
+    let mut changed = false;
+    for group in diff.grouped_ops(3) {
+        for op in group {
+            for change in diff.iter_changes(&op) {
+                match change.tag() {
+                    ChangeTag::Delete => {
+                        out.push_str(&format!("- {}", change.value()));
+                        changed = true;
+                    }
+                    ChangeTag::Insert => {
+                        out.push_str(&format!("+ {}", change.value()));
+                        changed = true;
+                    }
+                    ChangeTag::Equal => {
+                        out.push_str(&format!("  {}", change.value()));
+                    }
+                }
+            }
+        }
+    }
+    if !changed {
+        return String::new();
+    }
+    let out = truncate(&out, 4_000);
+    format!("```diff\n{}\n```", out.trim_end())
 }
 
 fn truncate(s: &str, max_bytes: usize) -> String {
@@ -495,12 +551,25 @@ fn system_prompt() -> String {
     let cwd = std::env::current_dir()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| ".".to_string());
-    format!(
+
+    let mut prompt = format!(
         "You are a helpful assistant running in a terminal.\n\
          File and directory tools are sandboxed to the current working directory: {cwd}\n\
          Do not attempt to access paths outside {cwd}. If a task requires files outside this \
          directory, ask the user to change directory or grant access rather than trying anyway."
-    )
+    );
+
+    // Auto-load project context files if present
+    let cwd_path = std::path::Path::new(&cwd);
+    for name in &["CLAUDE.md", "README.md", ".pantheon/context.md"] {
+        let path = cwd_path.join(name);
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            let truncated = truncate(&content, 8_000);
+            prompt.push_str(&format!("\n\n## {}\n{}", name, truncated));
+        }
+    }
+
+    prompt
 }
 
 // ── Anthropic streaming ───────────────────────────────────────────────────────

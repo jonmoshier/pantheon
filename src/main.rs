@@ -71,6 +71,9 @@ async fn run(mut app: app::App) -> Result<()> {
                             app.textarea.insert_newline();
                         }
 
+                        (KeyModifiers::ALT, KeyCode::Up) => app.history_prev(),
+                        (KeyModifiers::ALT, KeyCode::Down) => app.history_next(),
+
                         (KeyModifiers::NONE, KeyCode::Up)
                         | (KeyModifiers::NONE, KeyCode::PageUp) => app.scroll_up(),
 

@@ -6,48 +6,44 @@ use ratatui::style::{Color, Modifier, Style};
 use crate::api::StreamEvent;
 use crate::theme::{Theme, THEMES};
 
-/// Which API format and endpoint a model uses.
-/// OpenAiCompat covers Groq, Together, Ollama, OpenAI — same wire format, different URL + key.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub enum Provider {
     Anthropic,
-    OpenAiCompat { base_url: &'static str, env_key: &'static str },
+    OpenAiCompat { base_url: String, env_key: String },
 }
 
+#[derive(Clone)]
 pub struct Model {
-    pub label: &'static str,
-    pub id: &'static str,
+    pub label: String,
+    pub id: String,
     pub provider: Provider,
 }
 
-pub const MODELS: &[Model] = &[
-    Model { label: "Claude Haiku",   id: "claude-haiku-4-5-20251001",    provider: Provider::Anthropic },
-    Model { label: "Claude Sonnet",  id: "claude-sonnet-4-6",            provider: Provider::Anthropic },
-    Model { label: "Claude Opus",    id: "claude-opus-4-7",              provider: Provider::Anthropic },
-    Model {
-        label: "Groq Llama 3.3 70B",
-        id: "llama-3.3-70b-versatile",
-        provider: Provider::OpenAiCompat {
-            base_url: "https://api.groq.com/openai/v1",
-            env_key:  "GROQ_API_KEY",
-        },
-    },
-    Model {
-        label: "Groq Llama 3.1 8B",
-        id: "llama-3.1-8b-instant",
-        provider: Provider::OpenAiCompat {
-            base_url: "https://api.groq.com/openai/v1",
-            env_key:  "GROQ_API_KEY",
-        },
-    },
-];
+fn build_models() -> Vec<Model> {
+    crate::config::load_model_defs()
+        .into_iter()
+        .filter_map(|d| {
+            let provider = match d.provider.as_str() {
+                "anthropic" => Provider::Anthropic,
+                "openai-compat" => Provider::OpenAiCompat {
+                    base_url: d.base_url?,
+                    env_key: d.env_key?,
+                },
+                _ => return None,
+            };
+            Some(Model { label: d.label, id: d.id, provider })
+        })
+        .collect()
+}
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum Role {
     User,
     Assistant,
     System,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ChatMessage {
     pub role: Role,
     pub content: String,
@@ -65,6 +61,7 @@ pub struct App {
     pub messages: Vec<ChatMessage>,
     pub api_history: Vec<Value>,
     pub textarea: TextArea<'static>,
+    pub models: Vec<Model>,
     pub model_idx: usize,
     pub picker_idx: usize,
     pub theme_idx: usize,
@@ -80,6 +77,9 @@ pub struct App {
     pub spinner_tick: u8,
     pub confirm_tx: Option<mpsc::Sender<bool>>,
     pub status_msg: Option<(String, u8)>,
+    pub input_history: Vec<String>,
+    pub history_idx: Option<usize>,
+    pub history_draft: String,
 }
 
 impl App {
@@ -88,6 +88,7 @@ impl App {
             messages: vec![],
             api_history: vec![],
             textarea: make_textarea(),
+            models: build_models(),
             theme_idx: 0,
             model_idx: 0,
             picker_idx: 0,
@@ -103,6 +104,9 @@ impl App {
             spinner_tick: 0,
             confirm_tx: None,
             status_msg: None,
+            input_history: load_input_history(),
+            history_idx: None,
+            history_draft: String::new(),
         };
         if app.api_key.is_none() {
             app.push_system(
@@ -112,8 +116,8 @@ impl App {
         app
     }
 
-    pub fn model(&self) -> &'static Model {
-        &MODELS[self.model_idx]
+    pub fn model(&self) -> &Model {
+        &self.models[self.model_idx]
     }
 
     pub fn theme(&self) -> &'static Theme {
@@ -203,25 +207,29 @@ impl App {
             return;
         }
         self.textarea = make_textarea();
+        self.history_idx = None;
+        self.history_draft = String::new();
+        self.input_history.push(text.clone());
+        append_input_history(&text);
 
         if let Some(cmd) = text.strip_prefix('/') {
             self.handle_command(cmd);
             return;
         }
 
-        let provider = self.model().provider;
+        let provider = self.model().provider.clone();
 
         // Resolve the API key for whichever provider we're using
-        let api_key = match provider {
+        let api_key = match &provider {
             Provider::Anthropic => self.api_key.clone(),
             Provider::OpenAiCompat { env_key, .. } => crate::config::load_api_key(env_key),
         };
         let api_key = match api_key {
             Some(k) => k,
             None => {
-                let hint = match provider {
-                    Provider::Anthropic => "ANTHROPIC_API_KEY",
-                    Provider::OpenAiCompat { env_key, .. } => env_key,
+                let hint = match &provider {
+                    Provider::Anthropic => "ANTHROPIC_API_KEY".to_string(),
+                    Provider::OpenAiCompat { env_key, .. } => env_key.clone(),
                 };
                 self.push_system(format!("No API key — set {}", hint));
                 return;
@@ -238,7 +246,7 @@ impl App {
         // Anthropic uses api_history (preserves tool-use turns in native format).
         // OpenAI-compat providers get simple role+content pairs rebuilt from display messages
         // since they don't share the same history format.
-        let msgs: Vec<Value> = match provider {
+        let msgs: Vec<Value> = match &provider {
             Provider::Anthropic => {
                 self.api_history.push(json!({"role": "user", "content": text}));
                 self.api_history.clone()
@@ -260,15 +268,14 @@ impl App {
         self.confirm_tx = Some(confirm_tx);
         self.streaming = true;
 
-        let model = self.model().id.to_string();
+        let model_id = self.model().id.clone();
         let handle = match provider {
             Provider::Anthropic => tokio::spawn(async move {
-                crate::api::stream_anthropic(api_key, model, msgs, tx, confirm_rx).await;
+                crate::api::stream_anthropic(api_key, model_id, msgs, tx, confirm_rx).await;
             }),
             Provider::OpenAiCompat { base_url, .. } => {
-                let base_url = base_url.to_string();
                 tokio::spawn(async move {
-                    crate::api::stream_openai_compat(base_url, api_key, model, msgs, tx, confirm_rx).await;
+                    crate::api::stream_openai_compat(base_url, api_key, model_id, msgs, tx, confirm_rx).await;
                 })
             }
         };
@@ -309,7 +316,7 @@ impl App {
     }
 
     pub fn picker_down(&mut self) {
-        if self.picker_idx < MODELS.len() - 1 {
+        if self.picker_idx < self.models.len() - 1 {
             self.picker_idx += 1;
         }
     }
@@ -332,6 +339,90 @@ impl App {
         self.mode = AppMode::Normal;
     }
 
+    pub fn history_prev(&mut self) {
+        if self.input_history.is_empty() { return; }
+        let idx = match self.history_idx {
+            None => {
+                self.history_draft = self.textarea.lines().join("\n");
+                self.input_history.len() - 1
+            }
+            Some(i) => i.saturating_sub(1),
+        };
+        self.history_idx = Some(idx);
+        self.textarea = make_textarea();
+        self.textarea.insert_str(&self.input_history[idx]);
+    }
+
+    pub fn history_next(&mut self) {
+        let Some(idx) = self.history_idx else { return };
+        if idx + 1 >= self.input_history.len() {
+            self.history_idx = None;
+            let draft = std::mem::take(&mut self.history_draft);
+            self.textarea = make_textarea();
+            if !draft.is_empty() { self.textarea.insert_str(&draft); }
+        } else {
+            self.history_idx = Some(idx + 1);
+            self.textarea = make_textarea();
+            self.textarea.insert_str(&self.input_history[idx + 1]);
+        }
+    }
+
+    pub fn save_conversation(&mut self, name: &str) {
+        let dir = crate::config::conversations_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        let filename = if name.is_empty() { timestamp_name() } else { name.to_string() };
+        let path = dir.join(format!("{}.json", filename));
+        let data = serde_json::json!({
+            "version": 1,
+            "model": self.model().label,
+            "messages": self.messages,
+            "api_history": self.api_history,
+        });
+        match std::fs::write(&path, serde_json::to_string_pretty(&data).unwrap_or_default()) {
+            Ok(_) => self.push_info(format!("Saved to {}.json", filename)),
+            Err(e) => self.push_system(format!("error saving: {}", e)),
+        }
+    }
+
+    pub fn load_conversation(&mut self, name: &str) {
+        let dir = crate::config::conversations_dir();
+        if name.is_empty() {
+            match std::fs::read_dir(&dir) {
+                Ok(entries) => {
+                    let mut names: Vec<String> = entries
+                        .filter_map(|e| e.ok())
+                        .filter_map(|e| {
+                            let n = e.file_name().to_string_lossy().to_string();
+                            n.ends_with(".json").then(|| n.trim_end_matches(".json").to_string())
+                        })
+                        .collect();
+                    names.sort();
+                    if names.is_empty() {
+                        self.push_system("no saved conversations — use /save [name]".into());
+                    } else {
+                        self.push_system(format!("saved conversations:\n{}", names.iter().map(|n| format!("  {}", n)).collect::<Vec<_>>().join("\n")));
+                    }
+                }
+                Err(_) => self.push_system("no saved conversations — use /save [name]".into()),
+            }
+            return;
+        }
+        let path = dir.join(format!("{}.json", name));
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => { self.push_system(format!("error: '{}' not found — use /load to list saves", name)); return; }
+        };
+        let v: Value = match serde_json::from_str(&content) {
+            Ok(v) => v,
+            Err(e) => { self.push_system(format!("error parsing save: {}", e)); return; }
+        };
+        self.messages = serde_json::from_value(v["messages"].clone()).unwrap_or_default();
+        self.api_history = v["api_history"].as_array().cloned().unwrap_or_default();
+        self.current_stream.clear();
+        self.auto_scroll = true;
+        self.push_info(format!("Loaded '{}'", name));
+    }
+
     fn handle_command(&mut self, cmd: &str) {
         let mut parts = cmd.splitn(2, ' ');
         let verb = parts.next().unwrap_or("").to_lowercase();
@@ -341,18 +432,58 @@ impl App {
             "quit" | "exit" | "q" => {
                 self.should_quit = true;
             }
+            "save" => {
+                self.save_conversation(arg);
+            }
+            "load" => {
+                self.load_conversation(arg);
+            }
+            "context" | "ctx" => {
+                let cwd = std::env::current_dir()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|_| ".".to_string());
+
+                let mut lines = vec![
+                    format!("model:    {}", self.model().label),
+                    format!("cwd:      {}", cwd),
+                    format!("messages: {}  (api history: {})", self.messages.len(), self.api_history.len()),
+                ];
+
+                lines.push(String::new());
+                lines.push("context files:".into());
+                let ctx_path = std::path::Path::new(&cwd);
+                for name in &["CLAUDE.md", "README.md", ".pantheon/context.md"] {
+                    let path = ctx_path.join(name);
+                    if path.exists() {
+                        let size = std::fs::metadata(&path)
+                            .map(|m| format!("{} bytes", m.len()))
+                            .unwrap_or_else(|_| "?".into());
+                        lines.push(format!("  ✓ {} ({})", name, size));
+                    } else {
+                        lines.push(format!("  · {} (not found)", name));
+                    }
+                }
+
+                self.push_system(lines.join("\n"));
+            }
+            "clear" | "reset" => {
+                self.messages.clear();
+                self.api_history.clear();
+                self.current_stream.clear();
+                self.push_info("Conversation cleared.".into());
+            }
             "help" | "h" | "?" => {
                 self.open_help();
             }
             "model" => {
                 if arg.is_empty() {
                     self.open_model_picker();
-                } else if let Some(idx) = MODELS.iter().position(|m| {
+                } else if let Some(idx) = self.models.iter().position(|m| {
                     m.label.to_lowercase().contains(&arg.to_lowercase())
                         || m.id.to_lowercase().contains(&arg.to_lowercase())
                 }) {
                     self.model_idx = idx;
-                    self.push_info(format!("Switched to {}.", MODELS[idx].label));
+                    self.push_info(format!("Switched to {}.", self.models[idx].label));
                 } else {
                     self.push_system(format!(
                         "unknown model '{}' — try haiku, sonnet, or opus",
@@ -405,6 +536,37 @@ impl App {
         });
         self.auto_scroll = true;
     }
+}
+
+fn load_input_history() -> Vec<String> {
+    let path = crate::config::history_file();
+    let Ok(content) = std::fs::read_to_string(path) else { return vec![] };
+    content.lines()
+        .filter(|l| l.starts_with('+'))
+        .map(|l| l[1..].to_string())
+        .filter(|l| !l.is_empty())
+        .collect()
+}
+
+fn append_input_history(entry: &str) {
+    use std::io::Write as _;
+    let path = crate::config::history_file();
+    let _ = std::fs::create_dir_all(path.parent().unwrap());
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let _ = writeln!(f, "\n# {}\n+{}", secs, entry);
+    }
+}
+
+fn timestamp_name() -> String {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .to_string()
 }
 
 fn make_textarea() -> TextArea<'static> {
