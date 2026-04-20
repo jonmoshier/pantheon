@@ -8,14 +8,13 @@ name = "pan"
 path = "src/main.rs"
 
 [dependencies]
-ratatui = "0.29"
-crossterm = "0.28"
+ratatui = "0.30"
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
 serde_json = "1"
 futures-util = "0.3"
 anyhow = "1"
-tui-textarea = { version = "0.7", features = ["crossterm"] }
+ratatui-textarea = { version = "0.9", features = ["crossterm"] }
 pulldown-cmark = "0.12"
 url = "2"
 toml = "0.8"

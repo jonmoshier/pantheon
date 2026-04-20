@@ -1,7 +1,0 @@
-[advisories]
-ignore = [
-    # unmaintained transitive dep via ratatui 0.29.0
-    "RUSTSEC-2024-0436",
-    # lru IterMut unsoundness, transitive via ratatui 0.29.0
-    "RUSTSEC-2026-0002",
-]
