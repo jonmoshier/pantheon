@@ -19,5 +19,5 @@ pulldown-cmark = "0.13"
 url = "2"
 toml = "1.1"
 serde = { version = "1", features = ["derive"] }
-similar = "2"
+similar = "3"
 rusqlite = { version = "0.31", features = ["bundled"] }
