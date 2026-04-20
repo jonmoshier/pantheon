@@ -1,7 +1,7 @@
 use ratatui::style::{Color, Modifier, Style};
+use ratatui_textarea::TextArea;
 use serde_json::{json, Value};
 use tokio::{sync::mpsc, task::JoinHandle};
-use ratatui_textarea::TextArea;
 
 use crate::api::StreamEvent;
 use crate::theme::{Theme, THEMES};
