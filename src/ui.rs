@@ -171,7 +171,12 @@ fn render_status(f: &mut Frame, app: &App, area: Rect) {
         };
         (format!("{} {}  streaming", label, spinner), theme.status_fg)
     } else {
-        (app.model().label.to_string(), theme.status_fg)
+        let base = app.model().label.to_string();
+        let label = match &app.resolved_model {
+            Some(id) if id != &app.model().id => format!("{} ({})", base, id),
+            _ => base,
+        };
+        (label, theme.status_fg)
     };
 
     let cwd = std::env::current_dir()

@@ -93,29 +93,6 @@ pub fn pantheon_dir() -> PathBuf {
     PathBuf::from(home).join(".pantheon")
 }
 
-pub fn conversations_dir() -> PathBuf {
-    pantheon_dir().join("conversations")
-}
-
-pub fn history_file() -> PathBuf {
-    pantheon_dir().join("history")
-}
-
-pub fn load_last_model() -> Option<String> {
-    let path = pantheon_dir().join("settings.toml");
-    let contents = std::fs::read_to_string(path).ok()?;
-    let table: toml::Table = toml::from_str(&contents).ok()?;
-    table.get("last_model")?.as_str().map(|s| s.to_string())
-}
-
-pub fn save_last_model(model_id: &str) {
-    let dir = pantheon_dir();
-    let _ = std::fs::create_dir_all(&dir);
-    let path = dir.join("settings.toml");
-    let contents = format!("last_model = \"{}\"\n", model_id);
-    let _ = std::fs::write(path, contents);
-}
-
 pub fn load_api_key(env_key: &str) -> Option<String> {
     if let Ok(val) = std::env::var(env_key) {
         if !val.is_empty() {
@@ -123,6 +100,14 @@ pub fn load_api_key(env_key: &str) -> Option<String> {
         }
     }
     let path = pantheon_dir().join("credentials.json");
+    // Ensure credentials file is only readable by the owner
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if path.exists() {
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
+    }
     let contents = std::fs::read_to_string(path).ok()?;
     let map: HashMap<String, String> = serde_json::from_str(&contents).ok()?;
     map.get(env_key).cloned()

@@ -1,12 +1,13 @@
 mod api;
 mod app;
 mod config;
+mod db;
 mod markdown;
 mod theme;
 mod ui;
 
 use anyhow::Result;
-use crossterm::{
+use ratatui::crossterm::{
     event::{self, Event, KeyCode, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
