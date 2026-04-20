@@ -17,7 +17,7 @@ anyhow = "1"
 ratatui-textarea = { version = "0.9", features = ["crossterm"] }
 pulldown-cmark = "0.12"
 url = "2"
-toml = "0.8"
+toml = "1.1"
 serde = { version = "1", features = ["derive"] }
 similar = "2"
 rusqlite = { version = "0.31", features = ["bundled"] }
