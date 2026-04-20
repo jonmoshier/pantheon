@@ -86,16 +86,23 @@ pub struct App {
     pub history_draft: String,
     pub system_prompt_path: Option<String>,
     pub resolved_model: Option<String>,
+    pub db: crate::db::Db,
 }
 
 impl App {
     pub fn new(api_key: Option<String>, system_prompt_path: Option<String>) -> Self {
+        let db = crate::db::Db::open().expect("failed to open database");
+        let input_history = db.load_input_history().unwrap_or_default();
+        let theme_idx = db
+            .get_setting("theme_idx")
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(0);
         let mut app = Self {
             messages: vec![],
             api_history: vec![],
             textarea: make_textarea(),
             models: build_models(),
-            theme_idx: 0,
+            theme_idx,
             model_idx: 0, // overwritten below
             picker_idx: 0,
             streaming: false,
@@ -110,13 +117,14 @@ impl App {
             spinner_tick: 0,
             confirm_tx: None,
             status_msg: None,
-            input_history: load_input_history(),
+            input_history,
             history_idx: None,
             history_draft: String::new(),
             system_prompt_path,
             resolved_model: None,
+            db,
         };
-        if let Some(last_id) = crate::config::load_last_model() {
+        if let Some(last_id) = app.db.get_setting("last_model") {
             if let Some(idx) = app.models.iter().position(|m| m.id == last_id) {
                 app.model_idx = idx;
             }
@@ -137,6 +145,9 @@ impl App {
 
     pub fn cycle_theme(&mut self) {
         self.theme_idx = (self.theme_idx + 1) % THEMES.len();
+        let _ = self
+            .db
+            .set_setting("theme_idx", &self.theme_idx.to_string());
         self.push_info(format!("theme: {}", self.theme().name));
     }
 
@@ -190,8 +201,8 @@ impl App {
             let content = std::mem::take(&mut self.current_stream);
             if !content.is_empty() {
                 let label = self.model().label.to_string();
-                let model_label = match self.resolved_model.take() {
-                    Some(ref id) if id != &self.model().id => Some(format!("{} ({})", label, id)),
+                let model_label = match &self.resolved_model {
+                    Some(id) if id != &self.model().id => Some(format!("{} ({})", label, id)),
                     _ => Some(label),
                 };
                 self.messages.push(ChatMessage {
@@ -199,8 +210,6 @@ impl App {
                     content,
                     model_label,
                 });
-            } else {
-                self.resolved_model = None;
             }
             self.streaming = false;
             self.stream_handle = None;
@@ -231,7 +240,7 @@ impl App {
         self.history_idx = None;
         self.history_draft = String::new();
         self.input_history.push(text.clone());
-        append_input_history(&text);
+        let _ = self.db.append_input_history(&text);
 
         if let Some(cmd) = text.strip_prefix('/') {
             self.handle_command(cmd);
@@ -257,6 +266,7 @@ impl App {
             }
         };
 
+        self.resolved_model = None;
         self.messages.push(ChatMessage {
             role: Role::User,
             content: text.clone(),
@@ -285,6 +295,14 @@ impl App {
                 })
                 .collect(),
         };
+
+        let (msgs, trimmed) = trim_to_context_limit(msgs);
+        if trimmed > 0 {
+            self.push_system(format!(
+                "context window: dropped {} oldest message(s) to stay under limit",
+                trimmed
+            ));
+        }
 
         let (tx, rx) = mpsc::channel(256);
         let (confirm_tx, confirm_rx) = mpsc::channel(1);
@@ -331,7 +349,9 @@ impl App {
 
     pub fn confirm_model_select(&mut self) {
         self.model_idx = self.picker_idx;
-        crate::config::save_last_model(&self.models[self.model_idx].id);
+        let _ = self
+            .db
+            .set_setting("last_model", &self.models[self.model_idx].id);
         self.push_info(format!("Switched to {}.", self.model().label));
         self.mode = AppMode::Normal;
     }
@@ -399,83 +419,79 @@ impl App {
     }
 
     pub fn save_conversation(&mut self, name: &str) {
-        let dir = crate::config::conversations_dir();
-        let _ = std::fs::create_dir_all(&dir);
-        let filename = if name.is_empty() {
+        let save_name = if name.is_empty() {
             timestamp_name()
         } else {
             name.to_string()
         };
-        let path = dir.join(format!("{}.json", filename));
-        let data = serde_json::json!({
-            "version": 1,
-            "model": self.model().label,
-            "messages": self.messages,
-            "api_history": self.api_history,
-        });
-        match std::fs::write(
-            &path,
-            serde_json::to_string_pretty(&data).unwrap_or_default(),
-        ) {
-            Ok(_) => self.push_info(format!("Saved to {}.json", filename)),
+        let db_messages: Vec<crate::db::DbMessage> = self
+            .messages
+            .iter()
+            .map(|m| crate::db::DbMessage {
+                role: match m.role {
+                    Role::User => "user".into(),
+                    Role::Assistant => "assistant".into(),
+                    Role::System => "system".into(),
+                },
+                content: m.content.clone(),
+                model_label: m.model_label.clone(),
+            })
+            .collect();
+        match self
+            .db
+            .save_conversation(&save_name, &self.model().label, &db_messages)
+        {
+            Ok(_) => self.push_info(format!("Saved '{}'", save_name)),
             Err(e) => self.push_system(format!("error saving: {}", e)),
         }
     }
 
     pub fn load_conversation(&mut self, name: &str) {
-        let dir = crate::config::conversations_dir();
         if name.is_empty() {
-            match std::fs::read_dir(&dir) {
-                Ok(entries) => {
-                    let mut names: Vec<String> = entries
-                        .filter_map(|e| e.ok())
-                        .filter_map(|e| {
-                            let n = e.file_name().to_string_lossy().to_string();
-                            n.ends_with(".json")
-                                .then(|| n.trim_end_matches(".json").to_string())
-                        })
-                        .collect();
-                    names.sort();
-                    if names.is_empty() {
-                        self.push_system("no saved conversations — use /save [name]".into());
-                    } else {
-                        self.push_system(format!(
-                            "saved conversations:\n{}",
-                            names
-                                .iter()
-                                .map(|n| format!("  {}", n))
-                                .collect::<Vec<_>>()
-                                .join("\n")
-                        ));
-                    }
+            match self.db.list_conversations() {
+                Ok(names) if names.is_empty() => {
+                    self.push_system("no saved conversations — use /save [name]".into());
                 }
-                Err(_) => self.push_system("no saved conversations — use /save [name]".into()),
+                Ok(names) => {
+                    self.push_system(format!(
+                        "saved conversations:\n{}",
+                        names
+                            .iter()
+                            .map(|n| format!("  {}", n))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    ));
+                }
+                Err(e) => self.push_system(format!("error listing conversations: {}", e)),
             }
             return;
         }
-        let path = dir.join(format!("{}.json", name));
-        let content = match std::fs::read_to_string(&path) {
-            Ok(c) => c,
+        match self.db.load_conversation(name) {
+            Ok((_, db_messages)) => {
+                self.messages = db_messages
+                    .into_iter()
+                    .map(|m| ChatMessage {
+                        role: match m.role.as_str() {
+                            "user" => Role::User,
+                            "assistant" => Role::Assistant,
+                            _ => Role::System,
+                        },
+                        content: m.content,
+                        model_label: m.model_label,
+                    })
+                    .collect();
+                self.api_history.clear();
+                self.current_stream.clear();
+                self.auto_scroll = true;
+                self.push_info(format!("Loaded '{}'", name));
+            }
             Err(_) => {
                 self.push_system(format!(
                     "error: '{}' not found — use /load to list saves",
                     name
                 ));
-                return;
             }
-        };
-        let v: Value = match serde_json::from_str(&content) {
-            Ok(v) => v,
-            Err(e) => {
-                self.push_system(format!("error parsing save: {}", e));
-                return;
-            }
-        };
-        self.messages = serde_json::from_value(v["messages"].clone()).unwrap_or_default();
-        self.api_history = v["api_history"].as_array().cloned().unwrap_or_default();
-        self.current_stream.clear();
-        self.auto_scroll = true;
-        self.push_info(format!("Loaded '{}'", name));
+        }
     }
 
     fn handle_command(&mut self, cmd: &str) {
@@ -542,7 +558,7 @@ impl App {
                         || m.id.to_lowercase().contains(&arg.to_lowercase())
                 }) {
                     self.model_idx = idx;
-                    crate::config::save_last_model(&self.models[idx].id);
+                    let _ = self.db.set_setting("last_model", &self.models[idx].id);
                     self.push_info(format!("Switched to {}.", self.models[idx].label));
                 } else {
                     self.push_system(format!(
@@ -707,34 +723,33 @@ mod tests {
     }
 }
 
-fn load_input_history() -> Vec<String> {
-    let path = crate::config::history_file();
-    let Ok(content) = std::fs::read_to_string(path) else {
-        return vec![];
-    };
-    content
-        .lines()
-        .filter(|l| l.starts_with('+'))
-        .map(|l| l[1..].to_string())
-        .filter(|l| !l.is_empty())
-        .collect()
-}
+// ~100K tokens at 4 chars/token, leaving headroom for the system prompt and response.
+const MAX_CONTEXT_CHARS: usize = 400_000;
 
-fn append_input_history(entry: &str) {
-    use std::io::Write as _;
-    let path = crate::config::history_file();
-    let _ = std::fs::create_dir_all(path.parent().unwrap());
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
-        let secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let _ = writeln!(f, "\n# {}\n+{}", secs, entry);
+fn trim_to_context_limit(msgs: Vec<Value>) -> (Vec<Value>, usize) {
+    let total: usize = msgs
+        .iter()
+        .map(|m| m["content"].as_str().unwrap_or("").len())
+        .sum();
+    if total <= MAX_CONTEXT_CHARS {
+        return (msgs, 0);
     }
+    // Drop from the front (oldest) until we're under the limit, always keeping
+    // at least the last message (the current user turn).
+    let original_len = msgs.len();
+    let mut trimmed = msgs;
+    while trimmed.len() > 1 {
+        let total: usize = trimmed
+            .iter()
+            .map(|m| m["content"].as_str().unwrap_or("").len())
+            .sum();
+        if total <= MAX_CONTEXT_CHARS {
+            break;
+        }
+        trimmed.remove(0);
+    }
+    let dropped = original_len - trimmed.len();
+    (trimmed, dropped)
 }
 
 fn timestamp_name() -> String {

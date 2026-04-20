@@ -1,6 +1,7 @@
 mod api;
 mod app;
 mod config;
+mod db;
 mod markdown;
 mod theme;
 mod ui;
