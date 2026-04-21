@@ -21,18 +21,29 @@ pub fn render(f: &mut Frame, app: &mut App) {
         vertical: 0,
     });
 
+    let tool_log_height: u16 =
+        if !app.tool_log_visible || (app.tool_log.is_empty() && !app.streaming) {
+            0
+        } else {
+            6
+        };
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(3),
             Constraint::Length(1),
+            Constraint::Length(tool_log_height),
             Constraint::Length(5),
         ])
         .split(content);
 
     render_messages(f, app, chunks[0]);
     render_status(f, app, chunks[1]);
-    render_input(f, app, chunks[2]);
+    if tool_log_height > 0 {
+        render_tool_log(f, app, chunks[2]);
+    }
+    render_input(f, app, chunks[3]);
 
     if matches!(app.mode, AppMode::ModelSelect) {
         render_model_picker(f, app);
@@ -221,6 +232,65 @@ fn render_input(f: &mut Frame, app: &mut App, area: Rect) {
     f.render_widget(&app.textarea, inner);
 }
 
+fn render_tool_log(f: &mut Frame, app: &App, area: Rect) {
+    let theme = app.theme();
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.border))
+        .style(Style::default().bg(theme.bg))
+        .title(" Tools ")
+        .title_style(Style::default().fg(theme.dim));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let inner_height = inner.height as usize;
+    let inner_width = inner.width as usize;
+
+    let display_lines: Vec<String> = app
+        .tool_log
+        .iter()
+        .flat_map(|entry| entry.lines().map(|l| l.to_string()).collect::<Vec<_>>())
+        .collect();
+
+    if display_lines.is_empty() {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "no tool activity",
+                Style::default().fg(theme.dim),
+            ))),
+            inner,
+        );
+        return;
+    }
+
+    let start = if app.tool_log_scroll == u16::MAX || display_lines.len() <= inner_height {
+        display_lines.len().saturating_sub(inner_height)
+    } else {
+        (app.tool_log_scroll as usize).min(display_lines.len().saturating_sub(inner_height))
+    };
+
+    let lines: Vec<Line<'static>> = display_lines[start..]
+        .iter()
+        .take(inner_height)
+        .map(|l| {
+            let truncated = if l.len() > inner_width {
+                format!("{}…", &l[..inner_width.saturating_sub(1)])
+            } else {
+                l.clone()
+            };
+            Line::from(Span::styled(truncated, Style::default().fg(theme.dim)))
+        })
+        .collect();
+
+    f.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(theme.bg)),
+        inner,
+    );
+}
+
 fn render_model_picker(f: &mut Frame, app: &App) {
     let theme = app.theme();
 
@@ -290,7 +360,7 @@ fn render_model_picker(f: &mut Frame, app: &App) {
 fn render_help_dialog(f: &mut Frame, app: &App) {
     let theme = app.theme();
     let popup_width = 70u16;
-    let popup_height = 18u16;
+    let popup_height = 20u16;
     let area = centered_rect(popup_width, popup_height, f.area());
 
     f.render_widget(Clear, area);
@@ -367,6 +437,14 @@ fn render_help_dialog(f: &mut Frame, app: &App) {
     )));
     lines.push(Line::from(Span::styled(
         "  Ctrl+X             Cancel request",
+        Style::default().fg(theme.text),
+    )));
+    lines.push(Line::from(Span::styled(
+        "  Ctrl+L             Toggle tool log panel",
+        Style::default().fg(theme.text),
+    )));
+    lines.push(Line::from(Span::styled(
+        "  Ctrl+Up/Down       Scroll tool log",
         Style::default().fg(theme.text),
     )));
     lines.push(Line::from(Span::styled(

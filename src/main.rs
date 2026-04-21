@@ -72,6 +72,18 @@ async fn run(mut app: app::App) -> Result<()> {
                             app.cycle_theme();
                         }
 
+                        (KeyModifiers::CONTROL, KeyCode::Char('l')) => {
+                            app.toggle_tool_log();
+                        }
+
+                        (KeyModifiers::CONTROL, KeyCode::Up) => {
+                            app.tool_log_scroll_up();
+                        }
+
+                        (KeyModifiers::CONTROL, KeyCode::Down) => {
+                            app.tool_log_scroll_down();
+                        }
+
                         // Plain Enter submits; Alt+Enter inserts a newline
                         (KeyModifiers::NONE, KeyCode::Enter) => app.submit(),
                         (KeyModifiers::ALT, KeyCode::Enter) => {
