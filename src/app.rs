@@ -99,6 +99,9 @@ pub struct App {
     pub system_prompt_path: Option<String>,
     pub resolved_model: Option<String>,
     pub db: crate::db::Db,
+    pub tool_log: Vec<String>,
+    pub tool_log_scroll: u16,
+    pub tool_log_visible: bool,
 }
 
 impl App {
@@ -137,6 +140,9 @@ impl App {
             system_prompt_path,
             resolved_model: None,
             db,
+            tool_log: Vec::new(),
+            tool_log_scroll: u16::MAX,
+            tool_log_visible: true,
         };
         if let Some(last_id) = app.db.get_setting("last_model") {
             if let Some(idx) = app.models.iter().position(|m| m.id == last_id) {
@@ -193,6 +199,15 @@ impl App {
                     }
                     self.stream_chars += text.len();
                     self.current_stream.push_str(&text);
+                }
+                Ok(StreamEvent::ToolActivity(line)) => {
+                    self.tool_log.push(line);
+                    if self.tool_log.len() > 200 {
+                        self.tool_log.remove(0);
+                    }
+                    if self.tool_log_visible {
+                        self.tool_log_scroll = u16::MAX;
+                    }
                 }
                 Ok(StreamEvent::ApiHistory(new_msgs)) => {
                     self.api_history.extend(new_msgs);
@@ -420,6 +435,32 @@ impl App {
     pub fn scroll_down(&mut self) {
         self.auto_scroll = false;
         self.scroll_offset = self.scroll_offset.saturating_add(3);
+    }
+
+    pub fn tool_log_scroll_up(&mut self) {
+        let total_lines: usize = self.tool_log.iter().flat_map(|e| e.lines()).count();
+        let current = if self.tool_log_scroll == u16::MAX {
+            total_lines.saturating_sub(4) as u16
+        } else {
+            self.tool_log_scroll
+        };
+        self.tool_log_scroll = current.saturating_sub(1);
+    }
+
+    pub fn tool_log_scroll_down(&mut self) {
+        if self.tool_log_scroll != u16::MAX {
+            let next = self.tool_log_scroll.saturating_add(1);
+            let total_lines: usize = self.tool_log.iter().flat_map(|e| e.lines()).count();
+            if next as usize >= total_lines.saturating_sub(4) {
+                self.tool_log_scroll = u16::MAX;
+            } else {
+                self.tool_log_scroll = next;
+            }
+        }
+    }
+
+    pub fn toggle_tool_log(&mut self) {
+        self.tool_log_visible = !self.tool_log_visible;
     }
 
     pub fn open_help(&mut self) {

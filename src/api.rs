@@ -6,6 +6,7 @@ use tokio::sync::mpsc;
 
 pub enum StreamEvent {
     Delta(String),
+    ToolActivity(String),
     ApiHistory(Vec<Value>),
     ConfirmRequest(String),
     ModelResolved(String),
@@ -167,8 +168,8 @@ async fn run_tool(
             }
             match std::fs::read_to_string(&path) {
                 Ok(content) => {
-                    tx.send(StreamEvent::Delta(format!(
-                        "← _read {} bytes_\n\n",
+                    tx.send(StreamEvent::ToolActivity(format!(
+                        "← read {} bytes",
                         content.len()
                     )))
                     .await
@@ -177,7 +178,7 @@ async fn run_tool(
                 }
                 Err(e) => {
                     let msg = format!("error: {}", e);
-                    tx.send(StreamEvent::Delta(format!("← _{}_\n\n", msg)))
+                    tx.send(StreamEvent::ToolActivity(format!("← {}", msg)))
                         .await
                         .ok();
                     msg
@@ -200,16 +201,16 @@ async fn run_tool(
                 Ok(_) => {
                     let diff = diff_files(&old_content, content);
                     let summary = if diff.is_empty() {
-                        format!("← _wrote {} bytes (no changes)_\n\n", content.len())
+                        format!("← wrote {} bytes (no changes)", content.len())
                     } else {
-                        format!("← _wrote {} bytes_\n\n{}\n\n", content.len(), diff)
+                        format!("← wrote {} bytes\n{}", content.len(), diff)
                     };
-                    tx.send(StreamEvent::Delta(summary)).await.ok();
+                    tx.send(StreamEvent::ToolActivity(summary)).await.ok();
                     "ok".to_string()
                 }
                 Err(e) => {
                     let msg = format!("error: {}", e);
-                    tx.send(StreamEvent::Delta(format!("← _{}_\n\n", msg)))
+                    tx.send(StreamEvent::ToolActivity(format!("← {}", msg)))
                         .await
                         .ok();
                     msg
@@ -235,8 +236,8 @@ async fn run_tool(
             {
                 Ok(mut file) => match file.write_all(content.as_bytes()) {
                     Ok(_) => {
-                        tx.send(StreamEvent::Delta(format!(
-                            "← _appended {} bytes_\n\n",
+                        tx.send(StreamEvent::ToolActivity(format!(
+                            "← appended {} bytes",
                             content.len()
                         )))
                         .await
@@ -272,8 +273,8 @@ async fn run_tool(
                         })
                         .collect();
                     names.sort();
-                    tx.send(StreamEvent::Delta(format!(
-                        "← _listed {} entries_\n\n",
+                    tx.send(StreamEvent::ToolActivity(format!(
+                        "← listed {} entries",
                         names.len()
                     )))
                     .await
@@ -307,8 +308,8 @@ async fn run_tool(
             {
                 Ok(out) => {
                     let result = String::from_utf8_lossy(&out.stdout).to_string();
-                    tx.send(StreamEvent::Delta(format!(
-                        "← _search: {} bytes_\n\n",
+                    tx.send(StreamEvent::ToolActivity(format!(
+                        "← search: {} bytes",
                         result.len()
                     )))
                     .await
@@ -349,7 +350,7 @@ async fn run_tool(
                     truncated = true;
                     break;
                 }
-                tx.send(StreamEvent::Delta(format!("{}\n", line)))
+                tx.send(StreamEvent::ToolActivity(line.clone()))
                     .await
                     .ok();
                 output.push_str(&line);
@@ -363,8 +364,8 @@ async fn run_tool(
                 .unwrap_or(-1);
 
             let suffix = if truncated { " (truncated)" } else { "" };
-            tx.send(StreamEvent::Delta(format!(
-                "\n← _exit {}{}_\n\n",
+            tx.send(StreamEvent::ToolActivity(format!(
+                "← exit {}{}",
                 exit_code, suffix
             )))
             .await
@@ -391,8 +392,8 @@ async fn run_tool(
                     match resp.text().await {
                         Ok(body) => {
                             let truncated = truncate(&body, 50_000);
-                            tx.send(StreamEvent::Delta(format!(
-                                "← _HTTP {}, {} bytes_\n\n",
+                            tx.send(StreamEvent::ToolActivity(format!(
+                                "← HTTP {}, {} bytes",
                                 status,
                                 truncated.len()
                             )))
@@ -455,7 +456,7 @@ async fn run_tool(
                                     }
                                     "tool_use" => {
                                         let name = block["name"].as_str().unwrap_or("tool");
-                                        tx.send(StreamEvent::Delta(format!("\n→ **{}**\n", name)))
+                                        tx.send(StreamEvent::ToolActivity(format!("→ {}", name)))
                                             .await
                                             .ok();
                                     }
@@ -965,9 +966,6 @@ async fn collect_anthropic_stream(
                     if block["type"] == "tool_use" {
                         let id = block["id"].as_str().unwrap_or("").to_string();
                         let name = block["name"].as_str().unwrap_or("").to_string();
-                        tx.send(StreamEvent::Delta(format!("\n→ **{}**", name)))
-                            .await
-                            .ok();
                         cur_tool = Some(calls.len());
                         calls.push(AnthropicToolCall {
                             id,
@@ -1001,12 +999,13 @@ async fn collect_anthropic_stream(
                     if let Some(i) = cur_tool {
                         let input: Value =
                             serde_json::from_str(&calls[i].input_json).unwrap_or(Value::Null);
-                        tx.send(StreamEvent::Delta(format!(
-                            " `{}`\n",
-                            tool_hint(&calls[i].name, &input)
-                        )))
-                        .await
-                        .ok();
+                        let hint = tool_hint(&calls[i].name, &input);
+                        let entry = if hint.is_empty() {
+                            format!("→ {}", calls[i].name)
+                        } else {
+                            format!("→ {}  {}", calls[i].name, hint)
+                        };
+                        tx.send(StreamEvent::ToolActivity(entry)).await.ok();
                     }
                     cur_tool = None;
                 }
@@ -1227,9 +1226,6 @@ async fn collect_openai_stream(
                     }
                     if let Some(name) = delta["function"]["name"].as_str() {
                         calls[idx].name = name.to_string();
-                        tx.send(StreamEvent::Delta(format!("\n→ **{}**", name)))
-                            .await
-                            .ok();
                     }
                     if let Some(args) = delta["function"]["arguments"].as_str() {
                         calls[idx].arguments.push_str(args);
@@ -1240,12 +1236,13 @@ async fn collect_openai_stream(
             if choice["finish_reason"] == "tool_calls" {
                 for tc in &calls {
                     let args: Value = serde_json::from_str(&tc.arguments).unwrap_or(Value::Null);
-                    tx.send(StreamEvent::Delta(format!(
-                        " `{}`\n",
-                        tool_hint(&tc.name, &args)
-                    )))
-                    .await
-                    .ok();
+                    let hint = tool_hint(&tc.name, &args);
+                    let entry = if hint.is_empty() {
+                        format!("→ {}", tc.name)
+                    } else {
+                        format!("→ {}  {}", tc.name, hint)
+                    };
+                    tx.send(StreamEvent::ToolActivity(entry)).await.ok();
                 }
             }
         }
