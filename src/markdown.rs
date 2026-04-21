@@ -185,7 +185,11 @@ fn render_table(
             .iter()
             .enumerate()
             .map(|(i, c)| {
-                let w = if i < col_count { widths[i] } else { c.chars().count() };
+                let w = if i < col_count {
+                    widths[i]
+                } else {
+                    c.chars().count()
+                };
                 format!(" {:<w$} ", c, w = w)
             })
             .collect::<Vec<_>>()
