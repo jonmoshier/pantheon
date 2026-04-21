@@ -1,0 +1,13 @@
+#!/bin/bash
+set -e
+
+echo "--- cargo fmt --check ---"
+cargo fmt -- --check
+
+echo "--- cargo test ---"
+cargo test
+
+echo "--- cargo audit ---"
+cargo audit
+
+echo "--- all checks passed ---"

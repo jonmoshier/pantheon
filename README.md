@@ -37,6 +37,15 @@ cd pantheon
 cargo install --path .
 ```
 
+## Development setup
+
+After cloning, activate the git hooks (runs `cargo fmt`, `cargo test`, and `cargo audit` before each push):
+
+```bash
+git config core.hooksPath .githooks
+cargo install cargo-audit  # if not already installed
+```
+
 ## First run
 
 ```bash
