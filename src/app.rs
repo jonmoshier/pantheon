@@ -776,6 +776,7 @@ mod tests {
     #[test]
     fn cycle_theme_wraps_around() {
         let mut app = make_app();
+        app.theme_idx = 0;
         let total = THEMES.len();
         for _ in 0..total {
             app.cycle_theme();
