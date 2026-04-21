@@ -125,12 +125,35 @@ async fn check_ssrf(url_str: &str) -> Result<(), String> {
 
 // ── Shared tool execution ─────────────────────────────────────────────────────
 
+fn validate_tool_input(name: &str, input: &Value) -> Result<(), String> {
+    let required: &[&str] = match name {
+        "read_file" => &["path"],
+        "write_file" => &["path", "content"],
+        "append_file" => &["path", "content"],
+        "list_dir" => &["path"],
+        "search_files" => &["path", "pattern"],
+        "run_shell" => &["command"],
+        "fetch_url" => &["url"],
+        "delegate" => &["task"],
+        other => return Err(format!("unknown tool: {other}")),
+    };
+    for field in required {
+        if input[field].is_null() {
+            return Err(format!("tool '{name}' missing required field '{field}'"));
+        }
+    }
+    Ok(())
+}
+
 async fn run_tool(
     name: &str,
     input: &Value,
     tx: &mpsc::Sender<StreamEvent>,
     confirm_rx: &mut mpsc::Receiver<bool>,
 ) -> String {
+    if let Err(msg) = validate_tool_input(name, input) {
+        return format!("Error: {msg}. Check the required fields and try again.");
+    }
     match name {
         "read_file" => {
             let path = input["path"].as_str().unwrap_or("");
@@ -1284,5 +1307,96 @@ mod tests {
         let result = diff_files("a\n", "b\n");
         assert!(result.starts_with("```diff"));
         assert!(result.ends_with("```"));
+    }
+
+    // ── validate_tool_input ──────────────────────────────────────────────────
+
+    #[test]
+    fn validate_read_file_valid() {
+        let input = json!({"path": "foo.txt"});
+        assert!(validate_tool_input("read_file", &input).is_ok());
+    }
+
+    #[test]
+    fn validate_read_file_missing_path() {
+        let input = json!({});
+        let err = validate_tool_input("read_file", &input).unwrap_err();
+        assert!(err.contains("path"), "expected 'path' in error: {err}");
+    }
+
+    #[test]
+    fn validate_read_file_null_path() {
+        let input = json!({"path": null});
+        let err = validate_tool_input("read_file", &input).unwrap_err();
+        assert!(err.contains("path"), "expected 'path' in error: {err}");
+    }
+
+    #[test]
+    fn validate_write_file_missing_content() {
+        let input = json!({"path": "foo.txt"});
+        let err = validate_tool_input("write_file", &input).unwrap_err();
+        assert!(
+            err.contains("content"),
+            "expected 'content' in error: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_write_file_missing_path() {
+        let input = json!({"content": "hello"});
+        let err = validate_tool_input("write_file", &input).unwrap_err();
+        assert!(err.contains("path"), "expected 'path' in error: {err}");
+    }
+
+    #[test]
+    fn validate_write_file_valid() {
+        let input = json!({"path": "foo.txt", "content": "hello"});
+        assert!(validate_tool_input("write_file", &input).is_ok());
+    }
+
+    #[test]
+    fn validate_run_shell_missing_command() {
+        let input = json!({});
+        let err = validate_tool_input("run_shell", &input).unwrap_err();
+        assert!(
+            err.contains("command"),
+            "expected 'command' in error: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_run_shell_valid() {
+        let input = json!({"command": "ls"});
+        assert!(validate_tool_input("run_shell", &input).is_ok());
+    }
+
+    #[test]
+    fn validate_search_files_missing_pattern() {
+        let input = json!({"path": "."});
+        let err = validate_tool_input("search_files", &input).unwrap_err();
+        assert!(
+            err.contains("pattern"),
+            "expected 'pattern' in error: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_unknown_tool_returns_error() {
+        let input = json!({});
+        let err = validate_tool_input("does_not_exist", &input).unwrap_err();
+        assert!(
+            err.contains("unknown tool"),
+            "expected 'unknown tool' in error: {err}"
+        );
+    }
+
+    #[test]
+    fn silent_null_fallback_is_the_current_bug() {
+        // Documents the existing behavior we're fixing:
+        // malformed JSON silently becomes null, tool receives empty string for path
+        let bad_json = "not valid json {{{";
+        let input: Value = serde_json::from_str(bad_json).unwrap_or(Value::Null);
+        assert_eq!(input["path"].as_str().unwrap_or(""), "");
+        // After the fix, validate_tool_input would catch this before run_tool sees it
     }
 }
