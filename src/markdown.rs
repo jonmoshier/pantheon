@@ -13,6 +13,11 @@ pub fn to_lines(content: &str, theme: &Theme) -> Vec<Line<'static>> {
     let mut bold = false;
     let mut italic = false;
     let mut in_heading = false;
+    let mut in_table_cell = false;
+    let mut table_header: Vec<String> = Vec::new();
+    let mut table_data: Vec<Vec<String>> = Vec::new();
+    let mut table_row: Vec<String> = Vec::new();
+    let mut current_cell = String::new();
 
     let (text, dim, code_fg, code_bg, heading) = (
         theme.text,
@@ -67,6 +72,42 @@ pub fn to_lines(content: &str, theme: &Theme) -> Vec<Line<'static>> {
                     Style::default().fg(dim),
                 )));
             }
+            Event::Start(Tag::Table(_)) => {
+                flush(&mut spans, &mut lines);
+                table_header.clear();
+                table_data.clear();
+            }
+            Event::End(TagEnd::Table) => {
+                render_table(
+                    &table_header,
+                    &table_data,
+                    &mut lines,
+                    Style::default().fg(heading).add_modifier(Modifier::BOLD),
+                    Style::default().fg(text),
+                    Style::default().fg(dim),
+                );
+                lines.push(Line::default());
+            }
+            Event::Start(Tag::TableHead) => {
+                table_row.clear();
+            }
+            Event::End(TagEnd::TableHead) => {
+                table_header = std::mem::take(&mut table_row);
+            }
+            Event::Start(Tag::TableRow) => {
+                table_row.clear();
+            }
+            Event::End(TagEnd::TableRow) => {
+                table_data.push(std::mem::take(&mut table_row));
+            }
+            Event::Start(Tag::TableCell) => {
+                in_table_cell = true;
+                current_cell.clear();
+            }
+            Event::End(TagEnd::TableCell) => {
+                in_table_cell = false;
+                table_row.push(std::mem::take(&mut current_cell));
+            }
             Event::Text(t) => {
                 if in_code_block {
                     for line in t.lines() {
@@ -75,6 +116,8 @@ pub fn to_lines(content: &str, theme: &Theme) -> Vec<Line<'static>> {
                             Style::default().fg(code_fg).bg(code_bg),
                         )));
                     }
+                } else if in_table_cell {
+                    current_cell.push_str(&t);
                 } else {
                     let mut style = Style::default().fg(text);
                     if bold || in_heading {
@@ -90,7 +133,11 @@ pub fn to_lines(content: &str, theme: &Theme) -> Vec<Line<'static>> {
                 }
             }
             Event::Code(t) => {
-                spans.push(Span::styled(t.into_string(), Style::default().fg(code_fg)));
+                if in_table_cell {
+                    current_cell.push_str(&t);
+                } else {
+                    spans.push(Span::styled(t.into_string(), Style::default().fg(code_fg)));
+                }
             }
             Event::SoftBreak => {
                 spans.push(Span::raw(" "));
@@ -109,6 +156,57 @@ pub fn to_lines(content: &str, theme: &Theme) -> Vec<Line<'static>> {
 fn flush(spans: &mut Vec<Span<'static>>, lines: &mut Vec<Line<'static>>) {
     if !spans.is_empty() {
         lines.push(Line::from(std::mem::take(spans)));
+    }
+}
+
+fn render_table(
+    header: &[String],
+    data: &[Vec<String>],
+    lines: &mut Vec<Line<'static>>,
+    header_style: Style,
+    row_style: Style,
+    dim_style: Style,
+) {
+    let col_count = header.len();
+    if col_count == 0 {
+        return;
+    }
+    let mut widths: Vec<usize> = header.iter().map(|c| c.chars().count()).collect();
+    for row in data {
+        for (i, cell) in row.iter().enumerate() {
+            if i < col_count {
+                widths[i] = widths[i].max(cell.chars().count());
+            }
+        }
+    }
+
+    let format_row = |cells: &[String]| -> String {
+        cells
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let w = if i < col_count {
+                    widths[i]
+                } else {
+                    c.chars().count()
+                };
+                format!(" {:<w$} ", c, w = w)
+            })
+            .collect::<Vec<_>>()
+            .join("│")
+    };
+
+    lines.push(Line::from(Span::styled(format_row(header), header_style)));
+
+    let divider = widths
+        .iter()
+        .map(|&w| "─".repeat(w + 2))
+        .collect::<Vec<_>>()
+        .join("┼");
+    lines.push(Line::from(Span::styled(divider, dim_style)));
+
+    for row in data {
+        lines.push(Line::from(Span::styled(format_row(row), row_style)));
     }
 }
 
@@ -173,5 +271,16 @@ mod tests {
         let lines = to_lines("use `cargo test`", theme());
         let content = text_content(&lines);
         assert!(content.contains("cargo test"));
+    }
+
+    #[test]
+    fn table_renders_with_divider() {
+        let md = "| A | B |\n|---|---|\n| 1 | 2 |";
+        let lines = to_lines(md, theme());
+        let content = text_content(&lines);
+        assert!(content.contains('│'), "expected column separator │");
+        assert!(content.contains('─'), "expected header divider ─");
+        assert!(content.contains('A'));
+        assert!(content.contains('1'));
     }
 }
