@@ -417,6 +417,7 @@ async fn run_tool(
             let mut cmd = tokio::process::Command::new("claude");
             cmd.arg("--output-format")
                 .arg("stream-json")
+                .arg("--verbose")
                 .arg("--print")
                 .arg(task)
                 .stdout(std::process::Stdio::piped())
