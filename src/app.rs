@@ -1,6 +1,7 @@
 use ratatui::style::{Color, Modifier, Style};
 use ratatui_textarea::TextArea;
 use serde_json::{json, Value};
+use std::time::Instant;
 use tokio::{sync::mpsc, task::JoinHandle};
 
 use crate::api::StreamEvent;
@@ -17,6 +18,10 @@ pub struct Model {
     pub label: String,
     pub id: String,
     pub provider: Provider,
+    pub context_window: Option<usize>,
+    pub cost_per_mtok_input: Option<f64>,
+    #[allow(dead_code)]
+    pub cost_per_mtok_output: Option<f64>,
 }
 
 fn build_models() -> Vec<Model> {
@@ -35,6 +40,9 @@ fn build_models() -> Vec<Model> {
                 label: d.label,
                 id: d.id,
                 provider,
+                context_window: d.context_window.map(|n| n as usize),
+                cost_per_mtok_input: d.cost_per_mtok_input,
+                cost_per_mtok_output: d.cost_per_mtok_output,
             })
         })
         .collect()
@@ -79,6 +87,8 @@ pub struct App {
     pub should_quit: bool,
     pub mode: AppMode,
     pub spinner_tick: u8,
+    pub stream_start: Option<Instant>,
+    pub stream_chars: usize,
     pub confirm_tx: Option<mpsc::Sender<bool>>,
     pub status_msg: Option<(String, u8)>,
     pub input_history: Vec<String>,
@@ -115,6 +125,8 @@ impl App {
             should_quit: false,
             mode: AppMode::Normal,
             spinner_tick: 0,
+            stream_start: None,
+            stream_chars: 0,
             confirm_tx: None,
             status_msg: None,
             input_history,
@@ -172,6 +184,10 @@ impl App {
         loop {
             match rx.try_recv() {
                 Ok(StreamEvent::Delta(text)) => {
+                    if self.stream_start.is_none() {
+                        self.stream_start = Some(Instant::now());
+                    }
+                    self.stream_chars += text.len();
                     self.current_stream.push_str(&text);
                     self.spinner_tick = self.spinner_tick.wrapping_add(1);
                 }
@@ -212,6 +228,8 @@ impl App {
                 });
             }
             self.streaming = false;
+            self.stream_start = None;
+            self.stream_chars = 0;
             self.stream_handle = None;
             self.confirm_tx = None;
             self.auto_scroll = true;
@@ -219,6 +237,8 @@ impl App {
             self.push_system(format!("error: {}", e));
             self.current_stream.clear();
             self.streaming = false;
+            self.stream_start = None;
+            self.stream_chars = 0;
             self.stream_handle = None;
             self.confirm_tx = None;
             self.auto_scroll = true;
@@ -296,7 +316,12 @@ impl App {
                 .collect(),
         };
 
-        let (msgs, trimmed) = trim_to_context_limit(msgs);
+        let max_chars = self
+            .model()
+            .context_window
+            .map(|tokens| tokens * 4)
+            .unwrap_or(MAX_CONTEXT_CHARS);
+        let (msgs, trimmed) = trim_to_context_limit(msgs, max_chars);
         if trimmed > 0 {
             self.push_system(format!(
                 "context window: dropped {} oldest message(s) to stay under limit",
@@ -723,15 +748,15 @@ mod tests {
     }
 }
 
-// ~100K tokens at 4 chars/token, leaving headroom for the system prompt and response.
+// Fallback: ~100K tokens at 4 chars/token, used when a model has no context_window set.
 const MAX_CONTEXT_CHARS: usize = 400_000;
 
-fn trim_to_context_limit(msgs: Vec<Value>) -> (Vec<Value>, usize) {
+fn trim_to_context_limit(msgs: Vec<Value>, max_chars: usize) -> (Vec<Value>, usize) {
     let total: usize = msgs
         .iter()
         .map(|m| m["content"].as_str().unwrap_or("").len())
         .sum();
-    if total <= MAX_CONTEXT_CHARS {
+    if total <= max_chars {
         return (msgs, 0);
     }
     // Drop from the front (oldest) until we're under the limit, always keeping
@@ -743,7 +768,7 @@ fn trim_to_context_limit(msgs: Vec<Value>) -> (Vec<Value>, usize) {
             .iter()
             .map(|m| m["content"].as_str().unwrap_or("").len())
             .sum();
-        if total <= MAX_CONTEXT_CHARS {
+        if total <= max_chars {
             break;
         }
         trimmed.remove(0);
