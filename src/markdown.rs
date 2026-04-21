@@ -1,6 +1,6 @@
-use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use ratatui::{
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
 };
 
@@ -10,6 +10,7 @@ pub fn to_lines(content: &str, theme: &Theme) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut in_code_block = false;
+    let mut code_block_lang = String::new();
     let mut bold = false;
     let mut italic = false;
     let mut in_heading = false;
@@ -31,12 +32,17 @@ pub fn to_lines(content: &str, theme: &Theme) -> Vec<Line<'static>> {
 
     for event in parser {
         match event {
-            Event::Start(Tag::CodeBlock(_)) => {
+            Event::Start(Tag::CodeBlock(kind)) => {
                 flush(&mut spans, &mut lines);
                 in_code_block = true;
+                code_block_lang = match kind {
+                    CodeBlockKind::Fenced(lang) => lang.to_string().to_lowercase(),
+                    CodeBlockKind::Indented => String::new(),
+                };
             }
             Event::End(TagEnd::CodeBlock) => {
                 in_code_block = false;
+                code_block_lang.clear();
                 lines.push(Line::default());
             }
             Event::Start(Tag::Strong) => bold = true,
@@ -110,10 +116,24 @@ pub fn to_lines(content: &str, theme: &Theme) -> Vec<Line<'static>> {
             }
             Event::Text(t) => {
                 if in_code_block {
+                    let is_diff = code_block_lang == "diff";
                     for line in t.lines() {
+                        let fg = if is_diff {
+                            if line.starts_with('+') && !line.starts_with("+++") {
+                                Color::Rgb(166, 227, 161)
+                            } else if line.starts_with('-') && !line.starts_with("---") {
+                                Color::Rgb(243, 139, 168)
+                            } else if line.starts_with("@@") {
+                                Color::Rgb(137, 220, 235)
+                            } else {
+                                code_fg
+                            }
+                        } else {
+                            code_fg
+                        };
                         lines.push(Line::from(Span::styled(
                             format!("  {}", line),
-                            Style::default().fg(code_fg).bg(code_bg),
+                            Style::default().fg(fg).bg(code_bg),
                         )));
                     }
                 } else if in_table_cell {
@@ -271,6 +291,22 @@ mod tests {
         let lines = to_lines("use `cargo test`", theme());
         let content = text_content(&lines);
         assert!(content.contains("cargo test"));
+    }
+
+    #[test]
+    fn diff_block_colors_added_and_removed_lines() {
+        let md = "```diff\n+added line\n-removed line\n context\n```";
+        let lines = to_lines(md, theme());
+        let added = lines
+            .iter()
+            .find(|l| l.spans.iter().any(|s| s.content.contains("added line")))
+            .unwrap();
+        let removed = lines
+            .iter()
+            .find(|l| l.spans.iter().any(|s| s.content.contains("removed line")))
+            .unwrap();
+        assert_eq!(added.spans[0].style.fg, Some(Color::Rgb(166, 227, 161)));
+        assert_eq!(removed.spans[0].style.fg, Some(Color::Rgb(243, 139, 168)));
     }
 
     #[test]

@@ -676,7 +676,16 @@ fn system_prompt(custom_path: Option<&str>) -> String {
         "You are a helpful assistant running in a terminal.\n\
          File and directory tools are sandboxed to the current working directory: {cwd}\n\
          Do not attempt to access paths outside {cwd}. If a task requires files outside this \
-         directory, ask the user to change directory or grant access rather than trying anyway."
+         directory, ask the user to change directory or grant access rather than trying anyway.\n\n\
+         Tool use guidelines:\n\
+         - Every tool call requires explicit user confirmation before it executes. Minimize \
+           the number of tool calls you make — batch related work into a single call where \
+           possible, and avoid redundant reads or exploratory calls you don't strictly need.\n\
+         - For multi-step coding tasks (edit multiple files, run tests, apply fixes), prefer \
+           the `delegate` tool over issuing many individual tool calls. `delegate` lets you \
+           describe the full task and handles it end-to-end with fewer interruptions.\n\
+         - Do not call tools speculatively. If you are unsure whether a file exists or a \
+           command will succeed, say so and ask the user rather than probing with tool calls."
     );
 
     // Load global user prompt: -s override or ~/.pantheon/system_prompt.md
