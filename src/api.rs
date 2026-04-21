@@ -350,9 +350,7 @@ async fn run_tool(
                     truncated = true;
                     break;
                 }
-                tx.send(StreamEvent::ToolActivity(line.clone()))
-                    .await
-                    .ok();
+                tx.send(StreamEvent::ToolActivity(line.clone())).await.ok();
                 output.push_str(&line);
                 output.push('\n');
             }

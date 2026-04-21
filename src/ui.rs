@@ -21,11 +21,12 @@ pub fn render(f: &mut Frame, app: &mut App) {
         vertical: 0,
     });
 
-    let tool_log_height: u16 = if !app.tool_log_visible || (app.tool_log.is_empty() && !app.streaming) {
-        0
-    } else {
-        6
-    };
+    let tool_log_height: u16 =
+        if !app.tool_log_visible || (app.tool_log.is_empty() && !app.streaming) {
+            0
+        } else {
+            6
+        };
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
