@@ -115,21 +115,9 @@ fn render_messages(f: &mut Frame, app: &mut App, area: Rect) {
         lines.push(Line::default());
     }
 
-    if app.streaming {
-        let spinner = SPINNER[app.spinner_tick as usize % SPINNER.len()];
-        let base = app.model().label.to_string();
-        let label = match &app.resolved_model {
-            Some(id) if id != &app.model().id => format!("{} ({})", base, id),
-            _ => base,
-        };
-        lines.push(Line::from(Span::styled(
-            format!("{} {}", label, spinner),
-            Style::default().fg(theme.dim).add_modifier(Modifier::BOLD),
-        )));
-        if !app.current_stream.is_empty() {
-            for md_line in crate::markdown::to_lines(&app.current_stream, theme) {
-                lines.push(indent_line(md_line));
-            }
+    if app.streaming && !app.current_stream.is_empty() {
+        for md_line in crate::markdown::to_lines(&app.current_stream, theme) {
+            lines.push(indent_line(md_line));
         }
     }
 
@@ -169,7 +157,16 @@ fn render_status(f: &mut Frame, app: &App, area: Rect) {
             Some(id) if id != &app.model().id => format!("{} ({})", base, id),
             _ => base,
         };
-        (format!("{} {}  streaming", label, spinner), theme.status_fg)
+        let tok_s = app.stream_start.map(|t| {
+            let secs = t.elapsed().as_secs_f64();
+            if secs > 0.2 {
+                let toks = (app.stream_chars as f64 / 4.0) / secs;
+                format!("  {:.0} tok/s", toks)
+            } else {
+                String::new()
+            }
+        }).unwrap_or_default();
+        (format!("{} {}{}", label, spinner, tok_s), theme.status_fg)
     } else {
         let base = app.model().label.to_string();
         let label = match &app.resolved_model {
@@ -223,7 +220,11 @@ fn render_input(f: &mut Frame, app: &mut App, area: Rect) {
 
 fn render_model_picker(f: &mut Frame, app: &App) {
     let theme = app.theme();
-    let popup_width = 38u16;
+
+    let max_label = app.models.iter().map(|m| m.label.len()).max().unwrap_or(10);
+    // prefix(4) + label + gap(2) + ctx(5) + gap(2) + price(9) + inner padding(2)
+    let inner_width = 4 + max_label + 2 + 5 + 2 + 9 + 4; // +4 right padding
+    let popup_width = (inner_width + 2) as u16; // +2 for borders
     let popup_height = (app.models.len() + 2) as u16;
     let area = centered_rect(popup_width, popup_height, f.area());
 
@@ -236,15 +237,36 @@ fn render_model_picker(f: &mut Frame, app: &App) {
         .map(|(i, m)| {
             let (prefix, style) = if i == app.picker_idx {
                 (
-                    "  ▸ ",
+                    "▸ ",
                     Style::default()
                         .fg(theme.user_accent)
                         .add_modifier(Modifier::BOLD),
                 )
             } else {
-                ("    ", Style::default().fg(theme.text))
+                ("  ", Style::default().fg(theme.dim))
             };
-            ListItem::new(format!("{}{}", prefix, m.label)).style(style)
+
+            let ctx = match m.context_window {
+                Some(n) if n >= 1_000_000 => format!("{:>3}M", n / 1_000_000),
+                Some(n) => format!("{:>3}K", n / 1_000),
+                None => "   —".to_string(),
+            };
+
+            let price = match m.cost_per_mtok_input {
+                Some(p) if p == 0.0 => "    free ".to_string(),
+                Some(p) => format!("${:>6.2}/M", p),
+                None => "         ".to_string(),
+            };
+
+            let row = format!(
+                "  {}{:<label_w$}  {:>5}  {}",
+                prefix,
+                m.label,
+                ctx,
+                price,
+                label_w = max_label,
+            );
+            ListItem::new(row).style(style)
         })
         .collect();
 

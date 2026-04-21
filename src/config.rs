@@ -2,19 +2,38 @@ use std::{collections::HashMap, path::PathBuf};
 
 const DEFAULT_MODELS_TOML: &str = r#"
 [[models]]
-label = "Claude Haiku"
+label = "Claude Haiku 4.5"
 id = "claude-haiku-4-5-20251001"
 provider = "anthropic"
+context_window = 200000
+cost_per_mtok_input = 1.00
+cost_per_mtok_output = 5.00
 
 [[models]]
-label = "Claude Sonnet"
+label = "Claude Sonnet 4.6"
 id = "claude-sonnet-4-6"
 provider = "anthropic"
+context_window = 1000000
+cost_per_mtok_input = 3.00
+cost_per_mtok_output = 15.00
 
 [[models]]
-label = "Claude Opus"
+label = "Claude Opus 4.7"
 id = "claude-opus-4-7"
 provider = "anthropic"
+context_window = 1000000
+cost_per_mtok_input = 5.00
+cost_per_mtok_output = 25.00
+
+[[models]]
+label = "Gemini 2.5 Flash"
+id = "gemini-2.5-flash"
+provider = "openai-compat"
+base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+env_key = "GEMINI_API_KEY"
+context_window = 1000000
+cost_per_mtok_input = 0.30
+cost_per_mtok_output = 2.50
 
 [[models]]
 label = "Gemini 2.5 Pro"
@@ -22,20 +41,9 @@ id = "gemini-2.5-pro"
 provider = "openai-compat"
 base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
 env_key = "GEMINI_API_KEY"
-
-[[models]]
-label = "Gemini 2.0 Flash"
-id = "gemini-2.0-flash"
-provider = "openai-compat"
-base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
-env_key = "GEMINI_API_KEY"
-
-[[models]]
-label = "Groq Llama 3.3 70B"
-id = "llama-3.3-70b-versatile"
-provider = "openai-compat"
-base_url = "https://api.groq.com/openai/v1"
-env_key = "GROQ_API_KEY"
+context_window = 1000000
+cost_per_mtok_input = 1.25
+cost_per_mtok_output = 10.00
 
 [[models]]
 label = "Groq Llama 3.1 8B"
@@ -43,6 +51,19 @@ id = "llama-3.1-8b-instant"
 provider = "openai-compat"
 base_url = "https://api.groq.com/openai/v1"
 env_key = "GROQ_API_KEY"
+context_window = 128000
+cost_per_mtok_input = 0.05
+cost_per_mtok_output = 0.08
+
+[[models]]
+label = "Groq Llama 3.3 70B"
+id = "llama-3.3-70b-versatile"
+provider = "openai-compat"
+base_url = "https://api.groq.com/openai/v1"
+env_key = "GROQ_API_KEY"
+context_window = 128000
+cost_per_mtok_input = 0.59
+cost_per_mtok_output = 0.79
 
 [[models]]
 label = "OR Auto"
@@ -59,6 +80,9 @@ pub struct ModelDef {
     pub provider: String,
     pub base_url: Option<String>,
     pub env_key: Option<String>,
+    pub context_window: Option<u64>,
+    pub cost_per_mtok_input: Option<f64>,
+    pub cost_per_mtok_output: Option<f64>,
 }
 
 #[derive(serde::Deserialize)]
