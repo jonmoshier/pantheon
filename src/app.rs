@@ -179,6 +179,8 @@ impl App {
             None => return,
         };
 
+        self.spinner_tick = self.spinner_tick.wrapping_add(1);
+
         let mut finished = false;
         let mut error: Option<String> = None;
         let mut confirm: Option<String> = None;
@@ -191,7 +193,6 @@ impl App {
                     }
                     self.stream_chars += text.len();
                     self.current_stream.push_str(&text);
-                    self.spinner_tick = self.spinner_tick.wrapping_add(1);
                 }
                 Ok(StreamEvent::ApiHistory(new_msgs)) => {
                     self.api_history.extend(new_msgs);
@@ -387,7 +388,15 @@ impl App {
         let _ = self
             .db
             .set_setting("last_model", &self.models[self.model_idx].id);
-        self.push_info(format!("Switched to {}.", self.model().label));
+        if matches!(self.model().provider, Provider::ClaudeCode) {
+            self.push_system(
+                "Claude Code mode: tool calls run inside the claude CLI with its own permission \
+                 prompts. Pantheon's Y/N confirm flow does not apply here."
+                    .into(),
+            );
+        } else {
+            self.push_info(format!("Switched to {}.", self.model().label));
+        }
         self.mode = AppMode::Normal;
     }
 
@@ -693,13 +702,12 @@ mod tests {
     #[test]
     fn model_command_with_arg_switches_model() {
         let mut app = make_app();
-        let initial_idx = app.model_idx;
         if app.models.len() > 1 {
-            let other_label = app.models[(initial_idx + 1) % app.models.len()]
-                .label
-                .clone();
-            app.handle_command(&format!("model {}", other_label));
-            assert_ne!(app.model_idx, initial_idx);
+            // Pin to index 0 so we have a known starting point, then switch by exact id
+            app.model_idx = 0;
+            let target_id = app.models[1].id.clone();
+            app.handle_command(&format!("model {}", target_id));
+            assert_eq!(app.model_idx, 1);
         }
     }
 
