@@ -20,6 +20,7 @@ pub struct Model {
     pub provider: Provider,
     pub context_window: Option<usize>,
     pub cost_per_mtok_input: Option<f64>,
+    #[allow(dead_code)]
     pub cost_per_mtok_output: Option<f64>,
 }
 

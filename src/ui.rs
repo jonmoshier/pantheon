@@ -256,7 +256,7 @@ fn render_model_picker(f: &mut Frame, app: &App) {
             };
 
             let price = match m.cost_per_mtok_input {
-                Some(p) if p == 0.0 => "    free ".to_string(),
+                Some(0.0) => "    free ".to_string(),
                 Some(p) => format!("${:>6.2}/M", p),
                 None => "         ".to_string(),
             };
