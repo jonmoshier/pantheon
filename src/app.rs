@@ -1,5 +1,5 @@
 use ratatui::style::{Color, Modifier, Style};
-use ratatui_textarea::TextArea;
+use ratatui_textarea::{TextArea, WrapMode};
 use serde_json::{json, Value};
 use std::time::Instant;
 use tokio::{sync::mpsc, task::JoinHandle};
@@ -236,7 +236,7 @@ impl App {
             if !content.is_empty() {
                 let label = self.model().label.to_string();
                 let model_label = match &self.resolved_model {
-                    Some(id) if id != &self.model().id => Some(format!("{} ({})", label, id)),
+                    Some(id) if id != &self.model().id => Some(format!("{}({})", label, id)),
                     _ => Some(label),
                 };
                 self.messages.push(ChatMessage {
@@ -616,7 +616,7 @@ impl App {
                     let path = ctx_path.join(name);
                     if path.exists() {
                         let size = std::fs::metadata(&path)
-                            .map(|m| format!("{} bytes", m.len()))
+                            .map(|m| format!("{}", m.len()))
                             .unwrap_or_else(|_| "?".into());
                         lines.push(format!("  ✓ {} ({})", name, size));
                     } else {
@@ -776,6 +776,7 @@ mod tests {
     #[test]
     fn cycle_theme_wraps_around() {
         let mut app = make_app();
+        app.theme_idx = 0;
         let total = THEMES.len();
         for _ in 0..total {
             app.cycle_theme();
@@ -857,5 +858,6 @@ fn make_textarea() -> TextArea<'static> {
         "Message… (Enter to send · Alt+Enter for newline · Ctrl+P for model · /help for commands)",
     );
     ta.set_placeholder_style(Style::default().fg(Color::Rgb(85, 85, 85)));
+    ta.set_wrap_mode(WrapMode::Word);
     ta
 }
