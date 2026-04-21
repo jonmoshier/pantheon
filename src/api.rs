@@ -487,6 +487,89 @@ async fn run_tool(
     }
 }
 
+// ── Claude Code provider ──────────────────────────────────────────────────────
+
+pub async fn stream_claude_code(msgs: Vec<Value>, tx: mpsc::Sender<StreamEvent>) {
+    // Build a plain transcript from the message history and pass it as the prompt.
+    // claude --print is stateless, so we reconstruct context each turn.
+    let mut transcript = String::new();
+    let n = msgs.len();
+    for (i, msg) in msgs.iter().enumerate() {
+        let role = msg["role"].as_str().unwrap_or("user");
+        let content = msg["content"].as_str().unwrap_or("");
+        if i < n - 1 {
+            // Prior turns: include as transcript context
+            let label = if role == "user" { "User" } else { "Assistant" };
+            transcript.push_str(&format!("{}: {}\n\n", label, content));
+        } else {
+            // Final (current) user message: append after transcript
+            if !transcript.is_empty() {
+                transcript.push_str(&format!("User: {}", content));
+            } else {
+                transcript = content.to_string();
+            }
+        }
+    }
+
+    if transcript.is_empty() {
+        let _ = tx.send(StreamEvent::Error("no message to send".into())).await;
+        return;
+    }
+
+    let mut child = match tokio::process::Command::new("claude")
+        .arg("--output-format")
+        .arg("stream-json")
+        .arg("--print")
+        .arg(&transcript)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = tx
+                .send(StreamEvent::Error(format!(
+                    "could not start claude CLI: {}",
+                    e
+                )))
+                .await;
+            return;
+        }
+    };
+
+    let stdout = child.stdout.take().unwrap();
+    let mut lines = tokio::io::BufReader::new(stdout).lines();
+
+    while let Ok(Some(line)) = lines.next_line().await {
+        let v: Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        match v["type"].as_str().unwrap_or("") {
+            "assistant" => {
+                if let Some(content) = v["message"]["content"].as_array() {
+                    for block in content {
+                        if block["type"].as_str() == Some("text") {
+                            if let Some(text) = block["text"].as_str() {
+                                if tx.send(StreamEvent::Delta(text.to_string())).await.is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            "result" => {
+                // result event marks completion; the text was already streamed above
+            }
+            _ => {}
+        }
+    }
+
+    let _ = child.wait().await;
+    let _ = tx.send(StreamEvent::Done).await;
+}
+
 async fn prompt_confirm(
     desc: &str,
     tx: &mpsc::Sender<StreamEvent>,

@@ -26,6 +26,11 @@ cost_per_mtok_input = 5.00
 cost_per_mtok_output = 25.00
 
 [[models]]
+label = "Claude Code"
+id = "claude-code"
+provider = "claude-code"
+
+[[models]]
 label = "Gemini 2.5 Flash"
 id = "gemini-2.5-flash"
 provider = "openai-compat"
