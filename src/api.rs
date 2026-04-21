@@ -139,9 +139,7 @@ fn validate_tool_input(name: &str, input: &Value) -> Result<(), String> {
     };
     for field in required {
         if input[field].is_null() {
-            return Err(format!(
-                "tool '{name}' missing required field '{field}'"
-            ));
+            return Err(format!("tool '{name}' missing required field '{field}'"));
         }
     }
     Ok(())
@@ -1337,7 +1335,10 @@ mod tests {
     fn validate_write_file_missing_content() {
         let input = json!({"path": "foo.txt"});
         let err = validate_tool_input("write_file", &input).unwrap_err();
-        assert!(err.contains("content"), "expected 'content' in error: {err}");
+        assert!(
+            err.contains("content"),
+            "expected 'content' in error: {err}"
+        );
     }
 
     #[test]
@@ -1357,7 +1358,10 @@ mod tests {
     fn validate_run_shell_missing_command() {
         let input = json!({});
         let err = validate_tool_input("run_shell", &input).unwrap_err();
-        assert!(err.contains("command"), "expected 'command' in error: {err}");
+        assert!(
+            err.contains("command"),
+            "expected 'command' in error: {err}"
+        );
     }
 
     #[test]
@@ -1370,14 +1374,20 @@ mod tests {
     fn validate_search_files_missing_pattern() {
         let input = json!({"path": "."});
         let err = validate_tool_input("search_files", &input).unwrap_err();
-        assert!(err.contains("pattern"), "expected 'pattern' in error: {err}");
+        assert!(
+            err.contains("pattern"),
+            "expected 'pattern' in error: {err}"
+        );
     }
 
     #[test]
     fn validate_unknown_tool_returns_error() {
         let input = json!({});
         let err = validate_tool_input("does_not_exist", &input).unwrap_err();
-        assert!(err.contains("unknown tool"), "expected 'unknown tool' in error: {err}");
+        assert!(
+            err.contains("unknown tool"),
+            "expected 'unknown tool' in error: {err}"
+        );
     }
 
     #[test]
