@@ -512,7 +512,9 @@ pub async fn stream_claude_code(msgs: Vec<Value>, tx: mpsc::Sender<StreamEvent>)
     }
 
     if transcript.is_empty() {
-        let _ = tx.send(StreamEvent::Error("no message to send".into())).await;
+        let _ = tx
+            .send(StreamEvent::Error("no message to send".into()))
+            .await;
         return;
     }
 
