@@ -702,13 +702,12 @@ mod tests {
     #[test]
     fn model_command_with_arg_switches_model() {
         let mut app = make_app();
-        let initial_idx = app.model_idx;
         if app.models.len() > 1 {
-            let other_label = app.models[(initial_idx + 1) % app.models.len()]
-                .label
-                .clone();
-            app.handle_command(&format!("model {}", other_label));
-            assert_ne!(app.model_idx, initial_idx);
+            // Pin to index 0 so we have a known starting point, then switch by exact id
+            app.model_idx = 0;
+            let target_id = app.models[1].id.clone();
+            app.handle_command(&format!("model {}", target_id));
+            assert_eq!(app.model_idx, 1);
         }
     }
 
