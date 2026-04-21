@@ -11,6 +11,7 @@ use crate::theme::{Theme, THEMES};
 pub enum Provider {
     Anthropic,
     OpenAiCompat { base_url: String, env_key: String },
+    ClaudeCode,
 }
 
 #[derive(Clone)]
@@ -34,6 +35,7 @@ fn build_models() -> Vec<Model> {
                     base_url: d.base_url?,
                     env_key: d.env_key?,
                 },
+                "claude-code" => Provider::ClaudeCode,
                 _ => return None,
             };
             Some(Model {
@@ -141,7 +143,7 @@ impl App {
                 app.model_idx = idx;
             }
         }
-        if app.api_key.is_none() {
+        if app.api_key.is_none() && !matches!(app.model().provider, Provider::ClaudeCode) {
             app.push_system("No API key found. Set ANTHROPIC_API_KEY and restart.".into());
         }
         app
@@ -177,6 +179,8 @@ impl App {
             None => return,
         };
 
+        self.spinner_tick = self.spinner_tick.wrapping_add(1);
+
         let mut finished = false;
         let mut error: Option<String> = None;
         let mut confirm: Option<String> = None;
@@ -189,7 +193,6 @@ impl App {
                     }
                     self.stream_chars += text.len();
                     self.current_stream.push_str(&text);
-                    self.spinner_tick = self.spinner_tick.wrapping_add(1);
                 }
                 Ok(StreamEvent::ApiHistory(new_msgs)) => {
                     self.api_history.extend(new_msgs);
@@ -269,22 +272,21 @@ impl App {
 
         let provider = self.model().provider.clone();
 
-        // Resolve the API key for whichever provider we're using
+        // ClaudeCode uses its own auth — no API key needed from Pantheon
         let api_key = match &provider {
+            Provider::ClaudeCode => None,
             Provider::Anthropic => self.api_key.clone(),
             Provider::OpenAiCompat { env_key, .. } => crate::config::load_api_key(env_key),
         };
-        let api_key = match api_key {
-            Some(k) => k,
-            None => {
-                let hint = match &provider {
-                    Provider::Anthropic => "ANTHROPIC_API_KEY".to_string(),
-                    Provider::OpenAiCompat { env_key, .. } => env_key.clone(),
-                };
-                self.push_system(format!("No API key — set {}", hint));
-                return;
-            }
-        };
+        if !matches!(provider, Provider::ClaudeCode) && api_key.is_none() {
+            let hint = match &provider {
+                Provider::Anthropic => "ANTHROPIC_API_KEY".to_string(),
+                Provider::OpenAiCompat { env_key, .. } => env_key.clone(),
+                Provider::ClaudeCode => unreachable!(),
+            };
+            self.push_system(format!("No API key — set {}", hint));
+            return;
+        }
 
         self.resolved_model = None;
         self.messages.push(ChatMessage {
@@ -294,16 +296,16 @@ impl App {
         });
         self.auto_scroll = true;
 
-        // Anthropic uses api_history (preserves tool-use turns in native format).
-        // OpenAI-compat providers get simple role+content pairs rebuilt from display messages
-        // since they don't share the same history format.
+        // Build message history for API call.
+        // ClaudeCode gets a plain transcript; Anthropic uses api_history; OpenAI-compat rebuilds
+        // from display messages.
         let msgs: Vec<Value> = match &provider {
             Provider::Anthropic => {
                 self.api_history
                     .push(json!({"role": "user", "content": text}));
                 self.api_history.clone()
             }
-            Provider::OpenAiCompat { .. } => self
+            Provider::OpenAiCompat { .. } | Provider::ClaudeCode => self
                 .messages
                 .iter()
                 .filter(|m| matches!(m.role, Role::User | Role::Assistant))
@@ -338,14 +340,23 @@ impl App {
         let model_id = self.model().id.clone();
         let spp = self.system_prompt_path.clone();
         let handle = match provider {
-            Provider::Anthropic => tokio::spawn(async move {
-                crate::api::stream_anthropic(api_key, model_id, msgs, tx, confirm_rx, spp).await;
-            }),
-            Provider::OpenAiCompat { base_url, .. } => tokio::spawn(async move {
-                crate::api::stream_openai_compat(
-                    base_url, api_key, model_id, msgs, tx, confirm_rx, spp,
-                )
-                .await;
+            Provider::Anthropic => {
+                let key = api_key.unwrap();
+                tokio::spawn(async move {
+                    crate::api::stream_anthropic(key, model_id, msgs, tx, confirm_rx, spp).await;
+                })
+            }
+            Provider::OpenAiCompat { base_url, .. } => {
+                let key = api_key.unwrap();
+                tokio::spawn(async move {
+                    crate::api::stream_openai_compat(
+                        base_url, key, model_id, msgs, tx, confirm_rx, spp,
+                    )
+                    .await;
+                })
+            }
+            Provider::ClaudeCode => tokio::spawn(async move {
+                crate::api::stream_claude_code(msgs, tx).await;
             }),
         };
         self.stream_handle = Some(handle);
@@ -377,7 +388,15 @@ impl App {
         let _ = self
             .db
             .set_setting("last_model", &self.models[self.model_idx].id);
-        self.push_info(format!("Switched to {}.", self.model().label));
+        if matches!(self.model().provider, Provider::ClaudeCode) {
+            self.push_system(
+                "Claude Code mode: tool calls run inside the claude CLI with its own permission \
+                 prompts. Pantheon's Y/N confirm flow does not apply here."
+                    .into(),
+            );
+        } else {
+            self.push_info(format!("Switched to {}.", self.model().label));
+        }
         self.mode = AppMode::Normal;
     }
 
