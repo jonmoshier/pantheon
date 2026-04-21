@@ -157,15 +157,18 @@ fn render_status(f: &mut Frame, app: &App, area: Rect) {
             Some(id) if id != &app.model().id => format!("{} ({})", base, id),
             _ => base,
         };
-        let tok_s = app.stream_start.map(|t| {
-            let secs = t.elapsed().as_secs_f64();
-            if secs > 0.2 {
-                let toks = (app.stream_chars as f64 / 4.0) / secs;
-                format!("  {:.0} tok/s", toks)
-            } else {
-                String::new()
-            }
-        }).unwrap_or_default();
+        let tok_s = app
+            .stream_start
+            .map(|t| {
+                let secs = t.elapsed().as_secs_f64();
+                if secs > 0.2 {
+                    let toks = (app.stream_chars as f64 / 4.0) / secs;
+                    format!("  {:.0} tok/s", toks)
+                } else {
+                    String::new()
+                }
+            })
+            .unwrap_or_default();
         (format!("{} {}{}", label, spinner, tok_s), theme.status_fg)
     } else {
         let base = app.model().label.to_string();
