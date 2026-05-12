@@ -1293,10 +1293,7 @@ fn strip_data_url_prefix(s: &str) -> &str {
     s
 }
 
-async fn save_streamed_images(
-    data_urls: &[String],
-    tx: &mpsc::Sender<StreamEvent>,
-) -> Vec<String> {
+async fn save_streamed_images(data_urls: &[String], tx: &mpsc::Sender<StreamEvent>) -> Vec<String> {
     use base64::Engine;
     let mut saved = Vec::new();
     if data_urls.is_empty() {
@@ -1328,7 +1325,9 @@ async fn save_streamed_images(
         };
         match std::fs::write(&filename, &bytes) {
             Ok(_) => {
-                tx.send(StreamEvent::ImageSaved(filename.clone())).await.ok();
+                tx.send(StreamEvent::ImageSaved(filename.clone()))
+                    .await
+                    .ok();
                 saved.push(filename);
             }
             Err(e) => {
