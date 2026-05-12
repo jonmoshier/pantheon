@@ -23,6 +23,7 @@ pub struct Model {
     pub cost_per_mtok_input: Option<f64>,
     #[allow(dead_code)]
     pub cost_per_mtok_output: Option<f64>,
+    pub output_modalities: Option<Vec<String>>,
 }
 
 fn build_models() -> Vec<Model> {
@@ -45,6 +46,7 @@ fn build_models() -> Vec<Model> {
                 context_window: d.context_window.map(|n| n as usize),
                 cost_per_mtok_input: d.cost_per_mtok_input,
                 cost_per_mtok_output: d.cost_per_mtok_output,
+                output_modalities: d.output_modalities,
             })
         })
         .collect()
@@ -219,6 +221,17 @@ impl App {
                 Ok(StreamEvent::ModelResolved(id)) => {
                     self.resolved_model = Some(id);
                 }
+                Ok(StreamEvent::ImageSaved(path)) => {
+                    let line = format!("← image saved: {}", path);
+                    self.tool_log.push(line);
+                    if self.tool_log.len() > 200 {
+                        self.tool_log.remove(0);
+                    }
+                    if self.tool_log_visible {
+                        self.tool_log_scroll = u16::MAX;
+                    }
+                    self.push_info(format!("Image saved: {}", path));
+                }
                 Ok(StreamEvent::Done) => {
                     finished = true;
                     break;
@@ -363,9 +376,10 @@ impl App {
             }
             Provider::OpenAiCompat { base_url, .. } => {
                 let key = api_key.unwrap();
+                let modalities = self.model().output_modalities.clone();
                 tokio::spawn(async move {
                     crate::api::stream_openai_compat(
-                        base_url, key, model_id, msgs, tx, confirm_rx, spp,
+                        base_url, key, model_id, msgs, tx, confirm_rx, spp, modalities,
                     )
                     .await;
                 })

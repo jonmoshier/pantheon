@@ -8,7 +8,9 @@ mod ui;
 
 use anyhow::Result;
 use ratatui::crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers},
+    event::{
+        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyModifiers,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -28,12 +30,12 @@ async fn main() -> Result<()> {
         .map(|w| w[1].clone());
 
     enable_raw_mode()?;
-    execute!(io::stdout(), EnterAlternateScreen)?;
+    execute!(io::stdout(), EnterAlternateScreen, EnableBracketedPaste)?;
 
     let result = run(app::App::new(api_key, system_prompt_path)).await;
 
     disable_raw_mode().ok();
-    execute!(io::stdout(), LeaveAlternateScreen).ok();
+    execute!(io::stdout(), DisableBracketedPaste, LeaveAlternateScreen).ok();
 
     result
 }
@@ -141,6 +143,11 @@ async fn run(mut app: app::App) -> Result<()> {
                         }
                     }
                 },
+                Event::Paste(text) => {
+                    if matches!(app.mode, AppMode::Normal) {
+                        app.textarea.insert_str(&text);
+                    }
+                }
                 Event::Resize(_, _) => {}
                 _ => {}
             }

@@ -1141,6 +1141,7 @@ name = "pan"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "futures-util",
  "pulldown-cmark",
  "ratatui",

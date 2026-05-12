@@ -10,6 +10,7 @@ pub enum StreamEvent {
     ApiHistory(Vec<Value>),
     ConfirmRequest(String),
     ModelResolved(String),
+    ImageSaved(String),
     Done,
     Error(String),
 }
@@ -1025,6 +1026,7 @@ pub async fn stream_openai_compat(
     tx: mpsc::Sender<StreamEvent>,
     mut confirm_rx: mpsc::Receiver<bool>,
     system_prompt_path: Option<String>,
+    output_modalities: Option<Vec<String>>,
 ) {
     if let Err(e) = openai_loop(
         base_url,
@@ -1034,6 +1036,7 @@ pub async fn stream_openai_compat(
         &tx,
         &mut confirm_rx,
         system_prompt_path.as_deref(),
+        output_modalities,
     )
     .await
     {
@@ -1049,6 +1052,7 @@ async fn openai_loop(
     tx: &mpsc::Sender<StreamEvent>,
     confirm_rx: &mut mpsc::Receiver<bool>,
     system_prompt_path: Option<&str>,
+    output_modalities: Option<Vec<String>>,
 ) -> anyhow::Result<()> {
     let client = Client::new();
     let mut all_messages =
@@ -1068,16 +1072,22 @@ async fn openai_loop(
             break;
         }
 
+        let mut body = json!({
+            "model": model,
+            "messages": all_messages,
+            "stream": true,
+        });
+        if let Some(mods) = &output_modalities {
+            body["modalities"] = json!(mods);
+        } else {
+            body["tools"] = json!(openai_tool_defs());
+        }
+
         let resp = client
             .post(format!("{}/chat/completions", base_url))
             .header("Authorization", format!("Bearer {}", api_key))
             .header("content-type", "application/json")
-            .json(&json!({
-                "model": model,
-                "messages": all_messages,
-                "tools": openai_tool_defs(),
-                "stream": true,
-            }))
+            .json(&body)
             .send()
             .await?;
 
@@ -1090,17 +1100,19 @@ async fn openai_loop(
             return Ok(());
         }
 
-        let (text, calls) = collect_openai_stream(resp, tx).await?;
+        let (text, calls, image_urls) = collect_openai_stream(resp, tx).await?;
+        let saved_images = save_streamed_images(&image_urls, tx).await;
 
         if calls.is_empty() {
-            if text.is_empty() {
+            let history_text = assistant_history_text(&text, &saved_images);
+            if history_text.is_empty() {
                 tx.send(StreamEvent::Error(
                     "model returned empty response".to_string(),
                 ))
                 .await
                 .ok();
             } else {
-                new_msgs.push(json!({"role": "assistant", "content": text}));
+                new_msgs.push(json!({"role": "assistant", "content": history_text}));
             }
             break;
         }
@@ -1156,11 +1168,13 @@ async fn openai_loop(
 async fn collect_openai_stream(
     resp: reqwest::Response,
     tx: &mpsc::Sender<StreamEvent>,
-) -> anyhow::Result<(String, Vec<OpenAiToolCall>)> {
+) -> anyhow::Result<(String, Vec<OpenAiToolCall>, Vec<String>)> {
     let mut stream = resp.bytes_stream();
     let mut buf = String::new();
     let mut text = String::new();
     let mut calls: Vec<OpenAiToolCall> = Vec::new();
+    let mut images: Vec<String> = Vec::new();
+    let mut announced_image = false;
     let mut model_resolved = false;
 
     'outer: while let Some(chunk) = stream.next().await {
@@ -1209,6 +1223,25 @@ async fn collect_openai_stream(
                 }
             }
 
+            if let Some(img_deltas) = choice["delta"]["images"].as_array() {
+                if !announced_image {
+                    tx.send(StreamEvent::ToolActivity(
+                        "← receiving image data…".to_string(),
+                    ))
+                    .await
+                    .ok();
+                    announced_image = true;
+                }
+                for (i, d) in img_deltas.iter().enumerate() {
+                    if let Some(url) = d["image_url"]["url"].as_str() {
+                        while images.len() <= i {
+                            images.push(String::new());
+                        }
+                        images[i].push_str(url);
+                    }
+                }
+            }
+
             if let Some(tc_deltas) = choice["delta"]["tool_calls"].as_array() {
                 for delta in tc_deltas {
                     let idx = delta["index"].as_u64().unwrap_or(0) as usize;
@@ -1246,7 +1279,84 @@ async fn collect_openai_stream(
         }
     }
 
-    Ok((text, calls))
+    Ok((text, calls, images))
+}
+
+/// Strip `data:<mime>;base64,` prefix from a data URL. Returns just the b64 payload,
+/// or the original string if no prefix is present.
+fn strip_data_url_prefix(s: &str) -> &str {
+    if let Some(rest) = s.strip_prefix("data:") {
+        if let Some(comma) = rest.find(',') {
+            return &rest[comma + 1..];
+        }
+    }
+    s
+}
+
+async fn save_streamed_images(
+    data_urls: &[String],
+    tx: &mpsc::Sender<StreamEvent>,
+) -> Vec<String> {
+    use base64::Engine;
+    let mut saved = Vec::new();
+    if data_urls.is_empty() {
+        return saved;
+    }
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let engine = base64::engine::general_purpose::STANDARD;
+    for (i, url) in data_urls.iter().enumerate() {
+        if url.is_empty() {
+            continue;
+        }
+        let payload = strip_data_url_prefix(url);
+        let bytes = match engine.decode(payload.trim()) {
+            Ok(b) => b,
+            Err(e) => {
+                tx.send(StreamEvent::Error(format!("image decode failed: {}", e)))
+                    .await
+                    .ok();
+                continue;
+            }
+        };
+        let filename = if data_urls.len() == 1 {
+            format!("pantheon-{}.png", ts)
+        } else {
+            format!("pantheon-{}-{}.png", ts, i)
+        };
+        match std::fs::write(&filename, &bytes) {
+            Ok(_) => {
+                tx.send(StreamEvent::ImageSaved(filename.clone())).await.ok();
+                saved.push(filename);
+            }
+            Err(e) => {
+                tx.send(StreamEvent::Error(format!("failed to write image: {}", e)))
+                    .await
+                    .ok();
+            }
+        }
+    }
+    saved
+}
+
+/// Build the text we save to chat history for an assistant turn that may have produced images.
+/// Keeps the data URL out of history so future turns aren't bloated.
+fn assistant_history_text(text: &str, saved_images: &[String]) -> String {
+    if saved_images.is_empty() {
+        return text.to_string();
+    }
+    let suffix = saved_images
+        .iter()
+        .map(|f| format!("[generated image saved to {}]", f))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if text.is_empty() {
+        suffix
+    } else {
+        format!("{}\n\n{}", text, suffix)
+    }
 }
 
 #[cfg(test)]
@@ -1491,5 +1601,62 @@ mod tests {
         let input: Value = serde_json::from_str(bad_json).unwrap_or(Value::Null);
         assert_eq!(input["path"].as_str().unwrap_or(""), "");
         // After the fix, validate_tool_input would catch this before run_tool sees it
+    }
+
+    // ── strip_data_url_prefix ────────────────────────────────────────────────
+
+    #[test]
+    fn strips_png_data_url() {
+        assert_eq!(strip_data_url_prefix("data:image/png;base64,AAAA"), "AAAA");
+    }
+
+    #[test]
+    fn strips_jpeg_data_url() {
+        assert_eq!(
+            strip_data_url_prefix("data:image/jpeg;base64,/9j/4AAQ"),
+            "/9j/4AAQ"
+        );
+    }
+
+    #[test]
+    fn passes_through_plain_base64() {
+        assert_eq!(strip_data_url_prefix("AAAA"), "AAAA");
+    }
+
+    #[test]
+    fn passes_through_data_url_without_comma() {
+        // Malformed but should not panic
+        assert_eq!(
+            strip_data_url_prefix("data:image/png;base64"),
+            "data:image/png;base64"
+        );
+    }
+
+    // ── assistant_history_text ───────────────────────────────────────────────
+
+    #[test]
+    fn history_text_no_images_returns_text_unchanged() {
+        assert_eq!(assistant_history_text("hello", &[]), "hello");
+    }
+
+    #[test]
+    fn history_text_image_only_returns_placeholder() {
+        let out = assistant_history_text("", &["pantheon-1.png".to_string()]);
+        assert_eq!(out, "[generated image saved to pantheon-1.png]");
+    }
+
+    #[test]
+    fn history_text_with_text_and_image_joins_both() {
+        let out = assistant_history_text("here you go", &["pantheon-1.png".to_string()]);
+        assert!(out.contains("here you go"));
+        assert!(out.contains("[generated image saved to pantheon-1.png]"));
+    }
+
+    #[test]
+    fn history_text_does_not_contain_base64() {
+        // The whole point: we save filenames, not the data URL
+        let out = assistant_history_text("", &["pantheon-1.png".to_string()]);
+        assert!(!out.contains("base64"));
+        assert!(!out.contains("data:image"));
     }
 }

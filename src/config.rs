@@ -76,6 +76,14 @@ id = "openrouter/auto"
 provider = "openai-compat"
 base_url = "https://openrouter.ai/api/v1"
 env_key = "OPENROUTER_API_KEY"
+
+[[models]]
+label = "Gemini 2.5 Flash Image"
+id = "google/gemini-2.5-flash-image"
+provider = "openai-compat"
+base_url = "https://openrouter.ai/api/v1"
+env_key = "OPENROUTER_API_KEY"
+output_modalities = ["image", "text"]
 "#;
 
 #[derive(serde::Deserialize)]
@@ -88,6 +96,7 @@ pub struct ModelDef {
     pub context_window: Option<u64>,
     pub cost_per_mtok_input: Option<f64>,
     pub cost_per_mtok_output: Option<f64>,
+    pub output_modalities: Option<Vec<String>>,
 }
 
 #[derive(serde::Deserialize)]
